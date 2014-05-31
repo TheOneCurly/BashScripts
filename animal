@@ -1,0 +1,45 @@
+#!/bin/bash
+
+animal=$(( $RANDOM % 5 ));
+
+if [ $# -gt 0 ]; then
+    echo "\"$@\"" 
+    echo '   \'
+fi
+
+if [ $animal -eq 0 ]; then
+  echo "    ^__^                "
+  echo "    (OO)\__________     "
+  echo "    (__)\          )\/\ "
+  echo "        ||-------W||    "
+  echo "        ||        ||    "
+  echo "        ||        ||    "
+elif [ $animal -eq 1 ]; then
+  echo "      __     __   "
+  echo "      \/-----\/   "
+  echo "       ).   .(    "
+  echo '      (  (")  )   '
+  echo "       )     (    "
+  echo "      /       \   "
+  echo "     (         )  "
+  echo "    ( \  /-\  / ) "
+  echo '     w`W      W`w '
+elif [ $animal -eq 2 ]; then
+  echo "     @ @  "
+  echo "    ('O') "
+  echo "   o(___)o"
+elif [ $animal -eq 3 ]; then
+  echo "      /\___/\  "
+  echo "  /  /  .   .\ "
+  echo "  \  \    ^  / "
+  echo "  \  /       \ "
+  echo "  \ /______  \ "
+elif [ $animal -eq 4 ]; then
+  echo "      _____     ____  "
+  echo "    /       \  |  o | "
+  echo "  /|         |/____\| "
+  echo "   |__________/       "
+  echo "   |_|_| |_|_|        "
+fi
+
+exit 

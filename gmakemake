@@ -1,0 +1,3417 @@
+#!/bin/sh
+
+# Copyright (c) 2001-2012, Matthew J. Healy (mjhealy@alum.rit.edu)
+# All rights reserved worldwide.
+# 
+# Redistribution and use in source and binary forms, with or without 
+# modification, are permitted provided that the following conditions are met:
+# 
+# 1) Redistributions of source code must retain the above copyright notice, 
+#    this list of conditions and the following disclaimer.
+# 
+# 2) Redistributions in binary form must reproduce the above copyright notice, 
+#    this list of conditions and the following disclaimer in the documentation 
+#    and/or other materials provided with the distribution.
+# 
+# 3) Neither the name of Matthew J. Healy nor the names of any other 
+#    contributors may be used to endorse or promote products derived from this 
+#    software without specific prior written permission.
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" 
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE 
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE 
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE 
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF 
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN 
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) 
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE 
+# POSSIBILITY OF SUCH DAMAGE. 
+# 
+# The views and conclusions contained in the software and documentation are 
+# those of the authors and should not be interpreted as representing official 
+# policies, either expressed or implied, of Matthew J. Healy.
+# 
+# 
+# 
+# (In case you're not familiar with the above, it's the BSD license
+# available at "http://www.opensource.org/licenses/bsd-license.php".  It's 
+# actually the 3-clause "New BSD License", with the disclaimer about 
+# views/opinions from the even newer 2-clause version tacked on at the end.)
+# 
+# Last updated:  $Date: 2013-08-26 20:06:30 -0400 (Mon, 26 Aug 2013) $
+# Version:       $Revision: 3656 $
+
+# SYNOPSIS:  gmakemake [ -ltarget ] [-h|otherParams] [otherSourceFiles....]
+# 
+# Run this program to create a makefile from all the source files in the 
+# current directory or specified on the command-line.  All files with the 
+# suffixes specified below that are in the current directory are assumed 
+# to be part of the system to be made.
+# 
+# All files not containing a main function are assumed to be linked
+# with each file containing a main function.  If the command line option
+# "-ltarget" is given, all non-main function files will be archived
+# into a single library named "libtarget.a".
+# 
+# Supported file extensions:
+#    * Header files are assumed to end in ".h" or ".H".
+#    * C files are assumed to end in ".c".
+#    * C++ files are assumed to end in ".cpp", ".C", or ".cp" (".CPP" and 
+#      ".CP" are also supported in 'case-insensitive' mode)
+#    * Objective-C files are assumed to end in ".m"
+#    * Lex files are assumed to end in ".l" or ".lxx".
+#    * ONC RPC source files are assumed to end in ".x"
+
+# NOTE: The script is definitely not infallible.  However, it's more 
+# intelligent than the original "makemake" script developed in RIT's 
+# CS department (or the updated C++ program written by department members), 
+# since this version actually uses "gcc" to determine the files upon which 
+# a given source module depends, rather than trying to  extract them via 
+# "grep" and "sed" commands (or equivalent operations) that ignore 
+# conditional compilation flags, etc.
+
+MYNAME=`basename "$0"`
+readonly MYNAME
+
+# Required under x86 Solaris in order to get "echo" to recognize the "-n"
+# parameter.
+SYSV3=foo
+export SYSV3
+
+# Keep track of the different settings established via command-line switches
+LIBRARY=
+
+LEX=NO
+YACC=NO
+XWIN=NO
+PREPROC=NO
+SHPROC=NO
+SILENT=NO
+PARANOID=NO
+USE_HEADER_MAK=NO
+BUILD_DEPS_ON=NO
+CVS_ON=NO
+SVN_ON=NO
+REVIEWS_ON=NO
+DOXYGEN_ON=NO
+DEBUG_ON=YES
+EXTRAS_ON=NO
+BEAUTY_ON=NO
+TESTING_ON=NO
+NOCASE_ON=NO
+OSX_ON=NO
+C_SUPPORT=YES
+FULL_CPP_SUPPORT=YES
+JAVA_SUPPORT=NO
+DISABLE_CPP_SUPPORT=NO
+C_FAMILY_ENABLED=YES
+DUMP_SETTINGS=NO
+RPC_SUPPORT=NO
+DEDUCE_PLATFORM_SUPPORT=NO
+GFILT_SUPPORT=NO
+OBJC_SUPPORT=NO
+DOCBOOK_SUPPORT=NO
+
+
+# Various temporary files used by this script
+SCRATCH_FILE=/tmp/gmakemake.$$
+readonly SCRATCH_FILE
+
+SCRATCH_FILE2=/tmp/gmakemake2.$$
+readonly SCRATCH_FILE2
+
+
+# Make sure that the temporary files are remove on exit
+trap "rm -f ${SCRATCH_FILE} ${SCRATCH_FILE2}" 0
+
+
+# Identifying the various source files and "virtual path directories" used by 
+# the code we're going to support building
+cfiles=
+Cfiles=
+lfiles=
+hfiles=
+Hfiles=
+javaFiles=
+rpcFiles=
+vpath_dirs=
+
+
+# Figure out which version of "make" we're recommending later....
+if which gmake > /dev/null 2>&1 < /dev/null
+then
+	MAKE_NAME=gmake
+else
+	MAKE_NAME=make
+fi
+readonly MAKE_NAME
+
+###########################################################################
+# Utility function, used to handle the fact that "echo" doesn't portably 
+# support the "-n" escape syntax anymore....
+echo_n() {
+	if [ "X$1" = "X-n" ] ; 
+	then shift ; printf "%s" "$*" ; 
+	else         printf "%s\n" "$*" ;
+	fi
+}
+
+###########################################################################
+# Basic usage function, outlining all of the options, etc.
+usage() {
+	echo "Usage: $MYNAME [options] [filenames....]"
+	echo 'Makefile generator, version $Revision: 3656 $' | sed -e 's/Revision: //' -e 's/\$//g'
+	echo ""
+	echo "Options include:"
+	echo "   -h                to display this usage (also -help, --help)"
+
+	echo ""
+	echo "              MAKEFILE GENERATION/PROCESSING"
+	echo "   -llibraryTarget   to create a named library target (vs. only applications)"
+	echo "   -silent           to suppress display of commands when building (*)"
+	echo "   -case             to enable case-insensitive file name handling (*)"
+	echo "   -header           to enable 'header.mak' processing (*)"
+	echo "   -paranoid         to 'manually' strip standard headers from dependencies"
+
+	echo ""
+	echo "              UTILITY TARGETS"
+	echo "   -cvs              to enable some CVS support targets (*)"
+	echo "   -svn              to enable some Subversion support targets (*)"
+	echo "   -reviews          to enable some code review support targets (*)"
+	echo "   -testing          to enable 'diffTest' target support (*)"
+	echo "   -extras           to enable some extra (convenience) targets (*)"
+
+	echo ""
+	echo "              LANGUAGES/TOOLS"
+	echo "   -c                to enable C code compilation support (+) (*)"
+	echo "   -preproc          to enable C preprocessor capture support"
+	echo "   -cpp              to enable C++ code compilation support (+) (*)"
+	echo "   -full-cpp         to enable C++ extensions besides '.cpp' (+) (*)"
+	echo "   -objc             to enable Objective-C code compilation (*)"
+	echo "   -java             to enable support for Java compilation (EXPERIMENTAL) (*)"
+	echo "   -shproc           to enable shell script processing"
+	echo "   -lex              to enable 'lex' source support"
+	echo "   -yacc             to enable 'yacc' source support"
+	echo "   -rpc              to enable support for ONC RPC compilation (*)"
+	echo "   -doxy             to enable Doxygen support (*)"
+	echo "   -gfilt            to enable support for 'gfilt' script usage (*)"
+	echo "   -x11              to enable X11 library usage"
+	echo "   -debug            to enable debugging support (+) (*)"
+	echo "   -osx              to enable OS X tools (Xcode projects) support (*)"
+	echo "   -docbook          to enable Docbook support (*)"
+	echo "   -beauty           to enable code beautification with AStyle (*)"
+
+	echo ""
+	echo "Options marked with '(*)' may be explicitly disabled by prepending '-no'"
+	echo "to their flags (e.g., '-no-cvs')."
+	echo "Options marked with '(+)' default to selected/enabled; all others default "
+	echo "to unselected/disabled."
+	echo ""
+	echo "Parameters may be set from the 'GMAKEMAKEINIT' environment variable, "
+	echo "and will be overridden by those on the command-line."
+	case "$GMAKEMAKEINIT" in
+	'')	echo "GMAKEMAKEINIT is not current set";;
+	*)	echo "Current GMAKEMAKEINIT settings are: " 
+		echo "$GMAKEMAKEINIT" | fmt -70 | sed -e 's/^/      /'
+	    ;;
+	esac
+}
+
+###########################################################################
+# Emits the "help" target for the makefile
+emit_help() {
+	cat << EOF
+help:
+	@echo "Targets include:"
+EOF
+	echo_n -n '	@echo "all clean purge archive unarchive '
+
+	case "$C_FAMILY_ENABLED" in
+	[yY]*)	echo_n -n "objs " ;;
+	esac
+
+	case "$RPC_SUPPORT" in
+	[yY]*) echo "rpcfiles " ;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	[yY]*) echo_n -n "classes " ;;
+	esac
+
+	if [ "${LIBRARY}" != "" ] ; then echo_n -n "library " ; fi
+
+	case "$DOXYGEN_ON" in
+	[yY]*) echo_n -n "docs " ;;
+	esac
+
+	case "$REVIEWS_ON" in
+	[yY]*) echo_n -n "findTodos " ;;
+	esac
+
+	case "${CVS_ON}${SVN_ON}" in
+	*[yY]*) echo_n -n "diff " ;;
+	esac
+
+	case "${EXTRAS_ON}" in
+	*[yY]*) echo_n -n "rebuild release debug " ;;
+	esac
+
+	case "${BEAUTY_ON}" in
+	*[yY]*) echo_n -n "beautify " ;;
+	esac
+
+	case "${TESTING_ON}" in
+	*[yY]*) echo_n -n "unitTest genBaseline diffTest " ;;
+	esac
+
+	case "${DOCBOOK_SUPPORT}" in
+	*[yY]*) echo_n -n "docbook fo pdf html chunked " ;;
+	esac
+	
+
+# OSX_ON=NO
+# RPC_SUPPORT=NO
+
+	if [ "$mainCfiles$maincfiles$mainlfiles$mainyfiles$rpcFiles$mainobjcfiles$mainJavaFiles" != "" ] 
+	then
+		cat << EOF
+" | fmt -65 | sed -e 's/^/	/'; \\
+	echo "" ; \\
+	echo "Application targets include:" ; \\
+EOF
+		echo_n -n '	echo "$(APPS) '
+	fi
+
+cat << EOF
+" | fmt -65 | sed -e 's/^/	/'
+
+EOF
+
+}
+
+
+###########################################################################
+# Emits the ".PHONY" target stuff
+emit_phony_support() {
+	phonyTargetsList="clean purge reallyclean all objs archive unarchive help"
+	case "${LIBRARY}" in
+	'') ;;
+	*)	phonyTargetsList="$phonyTargetsList library" ;;
+	esac
+
+	case "${RPC_SUPPORT}" in
+	[yY]*)	phonyTargetsList="$phonyTargetsList rpcfiles" ;;
+	esac
+
+	case "${DOXYGEN_ON}" in
+	''|NO) ;;
+	*)	phonyTargetsList="$phonyTargetsList docs" ;;
+	esac
+
+	case "${REVIEWS_ON}" in
+	''|NO) ;;
+	*)	phonyTargetsList="$phonyTargetsList findTodos" ;;
+	esac
+
+	case "${TESTING_ON}" in
+	''|NO)	;;
+	*)	phonyTargetsList="$phonyTargetsList genBaseline diffTest unitTest";;
+	esac
+
+	case "${EXTRAS_ON}" in
+	''|NO)	;;
+	*)	phonyTargetsList="$phonyTargetsList rebuild release debug" ;;
+	esac
+
+	case "${BEAUTY_ON}" in
+	''|NO)	;;
+	*)	phonyTargetsList="$phonyTargetsList beautify" ;;
+	esac
+
+	case "${CVS_ON}${SVN_ON}" in
+	*[yY]*)	phonyTargetsList="$phonyTargetsList diff diffDir" ;;
+	esac
+
+	case "${DOCBOOK_SUPPORT}" in
+	*[yY]*)	phonyTargetsList="$phonyTargetsList docbook fo pdf html chunked" ;;
+	esac
+	
+	cat <<-EOF
+		# The following target is only supported for GNU make, and indicates that 
+		# certain other targets don't actually produce a result in the file system 
+		# an object file, or an executable program), and instead they are just 
+		# 'convenience targets' to support what the programmer is doing.
+	EOF
+	echo ".PHONY: $phonyTargetsList " # | fmt -40 | sed -e 's/^\([^.]\)/         \1/'
+	echo ""
+}
+
+
+###########################################################################
+# Emits some special targets for Make to use in building
+emit_builtins() {
+	cat <<-EOF
+	####
+	#### Special (built-in) targets for make/gmake
+	####
+
+EOF
+	# echo ".SUFFIXES:"
+	case "${DISABLE_CPP_SUPPORT}" in
+	Y*) ;;
+	*)
+		echo ".SUFFIXES:	\$(SUFFIXES:.cc=.cpp)"
+		case "${FULL_CPP_SUPPORT}" in
+		Y*)
+			echo ".SUFFIXES:	\$(SUFFIXES:.cc+=.C .cp)"
+			;;
+		esac
+		case "${NOCASE_ON}" in
+		Y*)
+			echo ".SUFFIXES:	\$(SUFFIXES:.cc+=.CPP)"
+			case "${FULL_CPP_SUPPORT}" in
+			Y*)
+				echo ".SUFFIXES:	\$(SUFFIXES:.cc+=.CP)"
+				;;
+			esac
+			;;
+		esac
+		;;
+	esac
+
+	echo ""
+	echo "# The following target stops commands from being displayed during execution"
+	case "${SILENT}" in
+	Y*)
+		echo ".SILENT:"
+		;;
+	*)
+		echo "# .SILENT:"
+		;;
+	esac
+	echo ""
+
+	emit_phony_support
+
+	echo ""
+
+}
+
+
+###########################################################################
+# Emits the macros used to control Doxygen from the Makefile
+emit_doxygen_support_macros() {
+	cat <<-EOF
+	####
+	# Doxygen support macros
+	
+	# Inside the file included below -- which you must create -- you will specify 
+	# the value for the "DOXYGEN_DIR" macro, which contains the base directory for 
+	# Doxygen's installation on your machine
+	-include Doxygen.mk
+	
+	# This specifies the name of the Doxygen configuration file for your project
+	DOXYGEN_CONFIG_FILE = project.doxy
+	
+	# This will "point at" the Doxygen executable
+	ifeq ("\$(DOXYGEN_DIR)","")
+	DOXYGEN = doxygen
+	else
+	DOXYGEN = "\$(DOXYGEN_DIR)/bin/doxygen"
+	endif
+	
+	# Add the Doxygen configuration file to the list of things not to "auto-zap"
+	.PRECIOUS: \$(DOXYGEN_CONFIG_FILE)
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits the macros used to support Docbook content processing
+emit_docbook_support_macros() {
+	cat <<-EOF
+		#
+		# Docbook support 
+		#
+
+		# Optional file to define some machine-specific values:
+		#    "LOCAL_DOCBOOK_XSL_ROOT", specifying a path to the Docbook XSLT files 
+		#    "FOP_DIR", specifying the path to the FOP base directory on this machine
+		-include Docbook.mk
+
+		# Used to indicate if a draft version of documents are being generated. 
+		# Legal values are "yes", "no", and "maybe" (will default to "yes"). 
+		DRAFT_MODE = maybe
+
+		# The programs to use for the conversion process
+		XSLTPROC = xsltproc
+		XMLLINT  = xmllint
+
+		# Controls whether FOP-specific extensions in Docbook should be enabled
+		USE_FOP_EXTENSIONS?=YES
+
+		# Controls whether Docbook content should be validated during processing
+		VALIDATE_DOCBOOK=NO
+
+		# Controls whether network-based entity inclusion should be enabled
+		DOCBOOK_NET_INCLUDES=NO
+
+		# The network-based location of the DocBook XSLT sources
+		REMOTE_DOCBOOK_XSL_ROOT = http://docbook.sourceforge.net/release/xsl/current
+
+EOF
+
+	case "${SVN_ON}" in
+	[yY]*)
+		cat <<-EOF
+			# The file that will hold the Subversion-based "edition" number
+			EDITION_FILE=.edition.xml
+
+		EOF
+		;;
+	esac
+}
+
+
+###########################################################################
+# Emits the macros used to support simple (diff-based) unit testing
+emit_testing_support_macros() {
+	cat << EOF
+#
+# Simple unit-test support macros
+#
+
+# The name of the single target to be executed by "genBaseline" and "diffTest" 
+# in order to perform all unit tests
+TEST = unitTest
+
+# The names of any dependencies of the "\$(TEST)" target, which must be up to  
+# date before it can be run.  (These are typically unit test drivers, etc.)
+TEST_APPS =  
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits additional macros (extra flags, etc.)
+emit_extra_user_macros() {
+	echo "# Default target style (debug/release mode)"
+	case "${DEBUG_ON}" in
+	[yY]*)
+		echo "MODE = debug"
+		;;
+	*)
+		echo "MODE = release"
+		;;
+	esac
+	echo ""
+
+	echo "# Additional flags for debug/release mode builds"
+	case "$C_FAMILY_ENABLED" in
+	[yY]*)
+		cat << EOF
+DBG_FLAGS += -g -g3 -ggdb -O0 
+REL_FLAGS += -DNDEBUG 
+REL_FLAGS += -O3 
+# Note that -O3 includes -finline-functions (among others)
+# To optimize for speed/size tradeoff, use: REL_FLAGS += -Os 
+# To optimize purely for speed, use: REL_FLAGS += -fast
+EOF
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	Y*)
+		cat << EOF_JAVA
+JAVAC_DBG_FLAGS = -g 
+JAVAC_REL_FLAGS = -g:none
+JAVA_DBG_FLAGS  = -enableassertions
+JAVA_REL_FLAGS  = -disableassertions
+EOF_JAVA
+		;;
+	esac
+
+	echo ""
+
+}
+
+
+###########################################################################
+# Emits extra macros for Docbook that are "auto-calculated" from other settings
+emit_extra_docbook_macros() {
+	cat <<-EOF
+		#
+		# Docbook settings
+		#
+		
+		# Make sure that "DRAFT_MODE" is set to something
+		DRAFT_MODE?=yes
+
+		# Make sure that "FOP_PATH" is set
+		FOP_PATH?=\$(FOP_DIR)
+
+		# Apache "FOP" commands
+		FOP = \$(FOP_PATH)/fop
+		FOP_DEBUG = \$(FOP) -d
+		FOP_HEADLESS = FOP_OPTS="-Djava.awt.headless=true" ; export FOP_OPTS ; \$(FOP)
+
+		# Figure out what XSL stylesheets we'll really be using
+		ifeq ("\$(LOCAL_DOCBOOK_XSL_ROOT)","")
+		# We do not have local stylesheets available: use the network ones
+		DOCBOOK_XSL_ROOT = \$(REMOTE_DOCBOOK_XSL_ROOT)
+		DOCBOOK_XSL_URI = \$(REMOTE_DOCBOOK_XSL_ROOT)
+		else
+		# Use the local stylesheets
+		DOCBOOK_XSL_ROOT = \$(LOCAL_DOCBOOK_XSL_ROOT)
+		DOCBOOK_XSL_URI = file:///\$(LOCAL_DOCBOOK_XSL_ROOT)
+
+		# We can only disable network entity resolution if we have local copies of the 
+		# XSLT files
+		ifeq ("\$(DOCBOOK_NET_INCLUDES)","NO")
+		XSLTPROC += --nonet
+		XMLLINT += --nonet
+		endif
+		endif
+
+		# Locations of specific XSLT files within the DocBook sources
+		FO_XSL_SUBPATH=fo/docbook.xsl
+		HTML_XSL_SUBPATH=html/docbook.xsl
+		HTML_CHUNK_XSL_SUBPATH=html/chunk.xsl
+		XHTML_XSL_SUBPATH=xhtml/docbook.xsl
+		XHTML_CHUNK_XSL_SUBPATH=xhtml/chunk.xsl
+		
+		# The default image format (extension) to use for "admonishing graphics" (e.g.,
+		# warnings, notes, etc.)
+		ADMON_GRAPHICS_EXT ?= .gif
+
+		# Child directories used to hold particular types of (converted) content
+		FO_DIR=fo
+		PDF_DIR=pdf
+		HTML_DIR=html
+		CHUNKED_HTML_DIR=chunked
+
+		# The "base names" for Docbook output (i.e., file names with '.xml' 
+		# removed)
+		DOCBOOK_BASES =   \$(patsubst %.xml,%,\$(DOCBOOK_SRC_FILES))
+		
+		# The various outputs to be generated from Docbook content
+		DOCBOOK_PDF_FILES = \$(patsubst %,%.pdf,\$(DOCBOOK_BASES))
+		DOCBOOK_HTML_FILES = \$(patsubst %,%.html,\$(DOCBOOK_BASES))
+		DOCBOOK_OUTPUT_FILES = \$(DOCBOOK_PDF_FILES) \$(DOCBOOK_HTML_FILES)
+		
+		# Convert the list of XML source (base) files into the different output-formats
+		DOCBOOK_RESOLVED_FILES = \$(patsubst %.xml, resolved/%_resolved.xml, \\
+		                         \$(DOCBOOK_SRC_FILES))
+		DOCBOOK_GENERATED_FO_FILES = \$(patsubst %.xml, \$(FO_DIR)/%.fo, \\
+		                             \$(DOCBOOK_SRC_FILES))
+		DOCBOOK_GENERATED_PDF_FILES = \$(patsubst %.xml, \$(PDF_DIR)/%.pdf, \\
+		                              \$(DOCBOOK_SRC_FILES))
+		DOCBOOK_GENERATED_HTML_FILES = \$(patsubst %.xml, \$(HTML_DIR)/%.html, \\
+		                               \$(DOCBOOK_SRC_FILES))
+		DOCBOOK_GENERATED_CHUNKED_HTML_FILES = \$(patsubst %.xml, \\
+		                                       \$(CHUNKED_HTML_DIR)/%/index.html, \\
+		                                       \$(DOCBOOK_SRC_FILES))
+		DOCBOOK_GENERATED_FILES = \$(DOCBOOK_GENERATED_FO_FILES) \\
+		                          \$(DOCBOOK_GENERATED_PDF_FILES) \\
+		                          \$(DOCBOOK_GENERATED_HTML_FILES) \\
+		                          \$(DOCBOOK_GENERATED_CHUNKED_HTML_FILES)
+
+		# Prevent GNU make from deleting the "resolved" and "fo" files 
+		# automatically when the user just says to build a PDF file
+		.PRECIOUS: \$(DOCBOOK_RESOLVED_FILES) \$(DOCBOOK_GENERATED_FO_FILES)
+
+		# XSLT parameters to be used in the transforms (in place of defaults)
+		XSLTPROC_PARAMS += \\
+		             --stringparam admon.graphics.path "./images/" \\
+		             --stringparam admon.graphics 1 \\
+		             --stringparam admon.graphics.extension \\
+		                    \$(ADMON_GRAPHICS_EXT) \\
+		             --stringparam navig.graphics.path "./images/" \\
+		             --stringparam navig.graphics 1 \\
+		             --stringparam callout.graphics.path "./images/callouts/" \\
+		             --stringparam chunker.output.encoding UTF-8 \\
+		             --stringparam chunk.section.depth 2 \\
+		             --stringparam chunk.first.sections 1 \\
+		             --stringparam draft.mode \$(DRAFT_MODE) \\
+		             --stringparam hyphenate true \\
+		             --stringparam body.start.indent 0pt \\
+		             --stringparam footnote.font.size 60% \\
+		             --stringparam chapter.autolabel 0 \\
+		             --stringparam section.autolabel 1 \\
+		             --stringparam section.label.includes.component.label 1 \\
+		             --stringparam section.autolabel.max.depth 2 \\
+		             --stringparam html.stylesheet "./docbook.css" \\
+
+
+		UNUSED_XSLTPROC_PARAMS += \\
+		             --stringparam appendix.autolabel A \\
+		             --stringparam generate.toc "\$(TOC_PARAM_DATA)" \\
+		             --stringparam draft.watermark.image ./images/draft-bg.jpg \\
+		             --stringparam column.count.body  2 \\
+		             --stringparam column.count.back  2 \\
+
+		XSLTPROC_FOP_PARAMS = \\
+		             --stringparam fop.extensions 1 \\
+
+		XSLTPROC_FOP1_PARAMS = \\
+		             --stringparam fop1.extensions 1 \\
+
+		ifeq ("\$(USE_FOP1_EXTENSIONS)","YES")
+		XSLTPROC_PARAMS += \$(XSLTPROC_CONVERTER_FOP1_PARAMS)
+		else ifeq ("\$(USE_FOP_EXTENSIONS)","YES")
+		XSLTPROC_PARAMS += \$(XSLTPROC_CONVERTER_FOP_PARAMS)
+		endif
+
+		# Make sure that we have a "path separation character" set
+		ifeq ("\$(PATH_SEP)","")
+		# Best guess....
+		PATH_SEP=:
+		endif
+
+		# If validation is not desired, then mark it as disabled for the tools
+		ifeq ("\$(VALIDATE_DOCBOOK)","NO")
+		XSLTPROC += --novalid
+		XMLLINT  += --nowarning
+		endif
+
+EOF
+
+	case "${SVN_ON}" in
+	[yY]*)
+		cat <<-EOF
+			SVNVERSION ?= svnversion
+
+EOF
+		;;
+	esac
+}
+
+
+###########################################################################
+# Emits the utility targets used to generate things required by the Docbook 
+# support layer
+emit_docbook_support_targets() {
+cat << EOF
+#
+# Docbook support targets
+# 
+
+fo: \$(DOCBOOK_GENERATED_FO_FILES)
+pdf: \$(DOCBOOK_GENERATED_PDF_FILES)
+html: \$(DOCBOOK_GENERATED_HTML_FILES)
+chunked: \$(DOCBOOK_GENERATED_CHUNKED_HTML_FILES)
+docbook: fo pdf html chunked 
+
+# Base file, allowing for Docbook customization if desired
+docbook.css:
+	echo "<!-- Docbook HTML stylesheet customizations may go here -->" >> \$@
+
+# Base file, allowing for Docbook customization if desired
+docbook_fo_custom.xsl:
+	@echo "<?xml version='1.0'?>" > \$@
+	@echo "<xsl:stylesheet xmlns:xsl='http://www.w3.org/1999/XSL/Transform'" >> \$@
+	@echo "     xmlns:exsl='http://exslt.org/common'" >> \$@
+	@echo "     xmlns:fo='http://www.w3.org/1999/XSL/Format'" >> \$@
+	@echo "     exclude-result-prefixes='exsl'" >> \$@
+	@echo "     version='1.0'>" >> \$@
+	@echo "  <xsl:import href='DOCBOOK_BASE_URI/fo/docbook.xsl'/>" >> \$@
+	@echo "</xsl:stylesheet>" >> \$@
+
+# Target supporting the generation of the machine-local customization 
+# layer for XSL-FO output
+resolved/docbook_fo_custom_resolved.xsl: docbook_fo_custom.xsl
+	mkdir -p \`dirname "\$@"\`
+		sed -e 's|DOCBOOK_BASE_URI|\$(DOCBOOK_XSL_ROOT)|' < \$^ > \$@
+
+# Generated a utility script file, used to strip out some odd characters 
+# occasionally generated by Docbook in HTML
+strip.sh: 
+	@echo "#!/bin/sh" > strip.sh
+	@echo "tr '\320' '-'" >> strip.sh
+	@echo "tr -d '\312\322\323'" >> strip.sh
+	@chmod +x strip.sh
+
+EOF
+
+	case "${SVN_ON}" in
+	[yY]*)
+		cat << EOF
+\$(EDITION_FILE): versionCheck
+	@true
+
+versionCheck:
+	VERSION=\`\$(SVNVERSION) .\` ; \\
+		TEMP_FILE=/tmp/versionCheck.\$\$\$\$ ; \\
+		readonly TEMP_FILE; \\
+		if [ ! -f "\$(EDITION_FILE)" ] ; \\
+		then \\
+			echo "<edition>\$\$VERSION</edition>" > "\$(EDITION_FILE)" ; \\
+			echo "Generated 'edition' file" ; \\
+		elif [ "\$\$VERSION" != "\`sed -n -e 's/^.*edition.\(.*\)<\/edition.*\$\$/\1/p' < \$(EDITION_FILE)\`" ] ; \\
+		then \\
+			echo "<edition>\$\$VERSION</edition>" > \$\$TEMP_FILE ; \\
+			mv \$\$TEMP_FILE "\$(EDITION_FILE)" ; \\
+			touch "\$(EDITION_FILE)" ; \\
+			echo "Updated 'edition' file" ; \\
+		fi
+
+EOF
+		;;
+	*)
+		cat << EOF
+\$(EDITION_FILE):
+	@echo "Unknown" >> \$@
+
+EOF
+	;;
+	esac
+}
+
+
+###########################################################################
+# Emits extra macros that are "auto-calculated" from other settings
+emit_extra_auto_macros() {
+	cat << EOF
+# Depending on what mode we're building under, activate different settings
+ifeq ("\$(MODE)","release")
+EOF
+
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		cat << EOF
+CXXFLAGS += \$(REL_FLAGS)
+CFLAGS += \$(REL_FLAGS)
+LDFLAGS += \$(REL_FLAGS)
+EOF
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	Y*)
+		cat << EOF_JAVA
+JAVACFLAGS += \$(JAVAC_REL_FLAGS)
+JAVAFLAGS  += \$(JAVA_REL_FLAGS)
+EOF_JAVA
+		;;
+	esac
+
+	echo "else"
+
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		cat << EOF
+CXXFLAGS += \$(DBG_FLAGS)
+CFLAGS += \$(DBG_FLAGS)
+LDFLAGS += \$(DBG_FLAGS)
+EOF
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	Y*)
+		cat << EOF_JAVA
+JAVACFLAGS += \$(JAVAC_DBG_FLAGS)
+JAVAFLAGS  += \$(JAVA_DBG_FLAGS)
+EOF_JAVA
+		;;
+	esac
+
+	cat << EOF
+endif
+
+EOF
+
+	case "${DEDUCE_PLATFORM_SUPPORT}" in
+	[yY]*)
+		cat << PLATFORM_DEDUCTION_EOF
+# Try to deduce the current platform
+DEFAULT_PLATFORM=UNKNOWN
+ifeq ("\$(PLATFORM)","")
+	ifeq ("\$(OS_TYPE)","MACOSX")
+		PLATFORM=OSX
+	else ifeq ("\$(TERM)","cygwin")
+		PLATFORM=CYGWIN
+	else
+		PLATFORM=\$(DEFAULT_PLATFORM)
+	endif
+endif
+
+PLATFORM_DEDUCTION_EOF
+		;;
+	esac
+
+	case "${RPC_SUPPORT}" in
+	[yY]*)
+		cat << RPC_LIB_EOF
+# RPC support needs extra libraries/compile-time flags on some platforms
+ifeq ("\$(PLATFORM)","CYGWIN")
+	LDFLAGS += -lrpc
+else
+	# May be necessary on some platforms (e.g., NetBSD) 
+	# RPCGENFLAGS += -b -C 
+endif
+
+RPC_LIB_EOF
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	[yY]*)
+		cat << CLASSPATH_EOF
+# Classpath definition for this project
+CORE_CLASSPATH=\$(shell echo \$\$CLASSPATH)
+COMPUTED_CLASSPATH=\$(CLASSDIR)\$(CLASSPATH_SEP).
+ifeq (\$(CORE_CLASSPATH),)
+CLASSPATH=\$(COMPUTED_CLASSPATH)
+else
+CLASSPATH=\$(COMPUTED_CLASSPATH)\$(CLASSPATH_SEP)\$(CORE_CLASSPATH)
+endif
+
+CLASSPATH_EOF
+		;;
+	esac
+}
+
+
+###########################################################################
+# Emits macros for the various compilers and compiler settings
+emit_compiler_macros() {
+
+	case "${C_FAMILY_ENABLED}${JAVA_SUPPORT}" in
+	*[yY]*)	;;
+	*)		return ;;
+	esac
+
+	echo "# Compilers and compiler settings"
+	# echo "CXX ?= CC"
+	# echo "CXXFLAGS += +w ${DEBUG_FLAG}"
+	
+	case "${LEX}" in
+	[yY]*)
+		echo "LEX = flex"
+		echo "LEXARGS += --case-insensitive"
+		echo ""
+		;;
+	esac
+
+	case "${YACC}" in
+	[yY]*)
+		echo "YACC = bison"
+		# echo "YACCARGS += --case-insensitive"
+		echo ""
+		;;
+	esac
+
+	case "${EXTRAS_ON}" in
+	[yY]*)
+		debug_flags=
+		;;
+	*)
+		debug_flags=`echo '-g -ggdb '`
+		;;
+	esac
+
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		cat << EOF
+INCLUDE_DIRS += 
+LIB_DIRS     += 
+
+COMMONFLAGS += -Wall -Wextra -Wundef ${debug_flags} \\
+               -Wcast-qual -Wcast-align -Wconversion -Wreturn-type
+
+EOF
+		;;
+	esac
+
+	case "${DISABLE_CPP_SUPPORT}" in
+	[yY]*)
+		;;
+	*)
+		case "${GFILT_SUPPORT}" in
+		[yY]*)
+			cat << EOF_CPP
+REAL_CXX = g++
+# GFILT = INSERT PATH TO GFILT FILTER HERE (AND ENABLE THIS LINE)
+
+ifeq ("\$(GFILT)","")
+CXX      = \$(REAL_CXX) 
+else
+CXX      = \$(GFILT) -banner:N
+endif
+EOF_CPP
+			;;
+		*)
+			cat << EOF_CPP
+CXX      = g++
+EOF_CPP
+			;;
+		esac
+
+		cat << EOF_CPP_FLAGS
+CXXFLAGS += -Wold-style-cast \\
+            -Wsign-promo \\
+            -Wctor-dtor-privacy \\
+            -Woverloaded-virtual -Wnon-virtual-dtor \\
+            -Wno-deprecated
+
+## Some other options....
+# COMMONFLAGS += -Wfloat-equal -Wpointer-arith -Wunreachable-code 
+#
+# CFLAGS += -Wimplicit -Wwrite-strings -Wstrict-prototypes 
+# CFLAGS += -Wold-style-definition -Wmissing-prototypes 
+# CFLAGS += -Wmissing-declarations -Wmissing-noreturn 
+#
+# CXXFLAGS += -Weffc++ 
+
+EOF_CPP_FLAGS
+		;;
+	esac
+
+	case "${C_SUPPORT}" in
+	[yY]*)
+		cat << EOF_C
+CC       ?= gcc
+CFLAGS   += -Wmissing-declarations ${debug_flags} 
+
+EOF_C
+		;;
+	esac
+
+	case "${OBJC_SUPPORT}" in
+	[yY]*)
+		cat << EOF_OBJC
+OBJCC       ?= gcc
+OBJCFLAGS   += ${debug_flags} -Wall -Wextra \\
+               -Wundef -Wcast-qual -Wcast-align -Wconversion \\
+               -Wmissing-declarations -Wreturn-type 
+
+EOF_OBJC
+		;;
+	esac
+
+	case "$LEX" in
+	[yY]*)
+		echo "# To turn on linking against 'lex' support libraries, uncomment the next line"
+		echo "# LEX_LDFLAGS = -ll"
+		echo ""
+		;;
+	esac
+
+	case "$YACC" in
+	[yY]*)
+		echo "YACC_LDFLAGS = -ly"
+		echo ""
+		;;
+	esac
+
+	case "$XWIN" in
+	[yY]*)
+		echo "# To turn on X-Windows library linking, uncomment the next line"
+		echo "# XWIN_LDFLAGS = -lX11"
+		echo ""
+	esac
+
+	echo ""
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		echo "LDFLAGS += -lm ${debug_flags}"
+		;;
+	esac
+	case "$XWIN" in
+	[yY]*)
+		echo "LDFLAGS += \$(XWIN_LDFLAGS) "
+		;;
+	esac
+	case "$LEX" in
+	[yY]*)
+		echo "LDFLAGS += \$(LEX_LDFLAGS) "
+		;;
+	esac
+	case "$LEX" in
+	[yY]*)
+		echo "LDFLAGS += \$(YACC_LDFLAGS) "
+		;;
+	esac
+	echo ""
+
+	case "${BEAUTY_ON}" in
+	[yY]*)
+		cat <<- EOF_ASTYLE
+			# Settings for code beautification (via 'astyle')
+			ASTYLE = astyle
+			ASTYLE_FLAGS += -A2 --add-brackets --indent=spaces=4 --break-closing-brackets
+			ASTYLE_FLAGS += --convert-tabs -C -S -N -w --pad-header --add-brackets 
+			ASTYLE_FLAGS += --align-pointer=name --add-one-line-brackets 
+		
+		EOF_ASTYLE
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	Y*)
+		cat << EOF_JAVA
+JAVAC      ?= javac 
+JAVA       ?= java
+JAVADOC    ?= javadoc
+
+JAVASOURCE = 1.5
+
+CLASSPATH_SEP ?= :
+
+JAVACFLAGS += -source \$(JAVASOURCE) -sourcepath . -d "\$(CLASSDIR)" 
+JAVACFLAGS += -classpath "\$(CLASSPATH)\$(CLASSPATH_SEP)\$(CLASSDIR)"
+JAVACFLAGS += -deprecation 
+JAVACFLAGS += -Xlint:all
+
+JAVAFLAGS  +=  -classpath "\$(CLASSPATH)\$(CLASSPATH_SEP)\$(CLASSDIR)"
+
+JDOCFLAGS  += -classpath "\$(CLASSPATH)\$(CLASSPATH_SEP)\$(CLASSDIR)"
+JDOCFLAGS  += -d "\$(JDOCDIR)" 
+JDOCFLAGS  += -private -use -version -author -serialwarn 
+
+EOF_JAVA
+		;;
+	esac
+
+#	case "$LIBRARY" in
+#	'')	;;
+#	*)	echo "LDFLAGS += -L. -l${LIBRARY}"
+#		;;
+#	esac
+
+	case "${EXTRAS_ON}" in
+	[yY]*)
+		emit_extra_user_macros
+		;;
+	esac
+
+}
+
+
+###########################################################################
+# Emits all of the macros placed at the top of the makefile
+emit_macros() {
+	cat <<-EOF
+	####
+	#### Macros (variables) that will be used by make/gmake
+	####
+
+EOF
+
+	case "$vpath_dirs" in
+	'')	;;
+	*)
+		echo "# Additional directories in which source/header files reside"
+		echo_n -n "VPATH = "
+		(TEMP_LIST=`for d in $vpath_dirs ; do echo $d; done | sort -u`; echo $TEMP_LIST)
+		echo ""
+		;;
+	esac
+
+	echo "# The various source files for our program(s)"
+	case "$DISABLE_CPP_SUPPORT" in
+	[yY]*)
+		;;
+	*)
+		echo "MAIN_CPP_FILES  = $mainCfiles"
+		echo "OTHER_CPP_FILES = $otherCfiles"
+		echo ""
+		;;
+	esac
+
+	case "$C_SUPPORT" in
+	[yY]*)
+		echo "MAIN_C_FILES  = $maincfiles"
+		echo "OTHER_C_FILES = $othercfiles"
+		echo ""
+		;;
+	esac
+
+	case "$OBJC_SUPPORT" in
+	[yY]*)
+		echo "MAIN_OBJC_FILES  = $mainobjcfiles"
+		echo "OTHER_OBJC_FILES = $otherobjcfiles"
+		echo ""
+		;;
+	esac
+
+	case "$JAVA_SUPPORT" in
+	[yY]*)
+		echo "MAIN_JAVA_FILES  = $mainJavaFiles"
+		echo "OTHER_JAVA_FILES = $otherJavaFiles"
+		echo ""
+		;;
+	esac
+
+	case "$LEX" in
+	[yY]*)
+		echo "MAIN_L_FILES  = $mainlfiles"
+		echo "OTHER_L_FILES = $otherlfiles"
+		echo ""
+		;;
+	esac
+
+	case "$YACC" in
+	[yY]*)
+		echo "MAIN_YACC_FILES  = $mainyfiles"
+		echo "OTHER_YACC_FILES = $otheryfiles"
+		echo ""
+		;;
+	esac
+
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		echo "HFILES = $hfiles $Hfiles "
+		echo ""
+		;;
+	esac
+
+	case "${RPC_SUPPORT}" in
+	[yY]*)
+		echo "RPC_FILES = $rpcFiles "
+		echo ""
+		;;
+	esac
+
+	case "${DOCBOOK_SUPPORT}" in
+	[yY]*)
+		cat <<-EOF
+		# Docbook source files to be converted to PDF/HTML/etc.
+		DOCBOOK_SRC_FILES = 
+
+EOF
+		;;
+	esac
+
+	cat <<-EOF
+	# Other files for your project, such as a 'ReadMe', etc.
+	OTHER_FILES = 
+
+EOF
+
+	if [ "${USE_HEADER_MAK}" = "YES" -a -f header.mak -a -r header.mak ] ; then
+		echo "#############################################"
+		echo "# Start of custom settings from 'header.mak'"
+		echo ""
+		cat header.mak
+		echo ""
+		echo "# End of custom settings from 'header.mak'"
+		echo "#############################################"
+		echo ""
+		echo ""
+	else
+		emit_compiler_macros
+	fi
+
+	case "$JAVA_SUPPORT" in
+	[yY]*)
+		cat <<-EOF
+		# The subdirectory where class files will be stored
+		CLASSDIR = classes
+		
+		# The subdirectory where Javadoc files should be placed
+		JDOCDIR  = html
+
+EOF
+		;;
+	esac
+
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		cat <<-EOF
+		# The subdirectory where intermediate files (.o, etc.) will be stored
+		OBJDIR = objs
+
+
+		# The extension used for object code files on this system
+		OBJEXT = o
+
+
+		# The subdirectory where executable files (.EXE under Windows) will be stored
+		EXEDIR = .
+
+EOF
+		;;
+	esac
+
+	if [ "$LIBRARY" != "" ]; then
+		cat <<-EOF
+		# The directory in which the library is to be built
+		LIBDIR = .
+
+		# The name of the library that we'll build
+		LIBRARY = \$(LIBDIR)/lib${LIBRARY}.a
+
+EOF
+	fi
+
+	case "$DOXYGEN_ON" in
+	[yY]*)
+		emit_doxygen_support_macros
+		;;
+	esac
+
+	case "$DOCBOOK_SUPPORT" in
+	[yY]*)
+		emit_docbook_support_macros
+		;;
+	esac
+
+	case "$TESTING_ON" in
+	[yY]*)
+		emit_testing_support_macros
+		;;
+	esac
+
+	cat <<-EOF
+	####
+	# Other environmental detection/set-up
+	#
+
+	# The target platform.  This will default to whatever the 'uname' command 
+	# reports as the hardware/OS name for the current system when 'make' is 
+	# run, but can be manually overridden if you're using a cross-compiler, 
+	# etc.
+	ARCH := \$(shell uname -m)
+	OS := \$(shell uname)
+
+EOF
+
+	cat <<-EOF
+
+	#-------------------------------------------------------------------
+	# The values for the rest of the macro variables are generated from 
+	# the settings above (or are typically "well-known" values).
+	#-------------------------------------------------------------------
+
+EOF
+
+	case "$C_FAMILY_ENABLED" in
+	[yY]*)
+
+		case "$vpath_dirs" in
+		'')	;;
+		*)
+			echo "# Updating include paths to cover additional source directories"
+			echo "INCLUDE_DIRS += \$(patsubst %, -I%, \$(VPATH))"
+			echo ""
+			;;
+		esac
+
+		cat << EOF
+# Updating preproc/library paths to cover extra directories
+COMMONFLAGS += \$(patsubst %,-I%,\$(INCLUDE_DIRS))
+LDFLAGS     += \$(patsubst %,-L%,\$(LIB_DIRS))
+
+# Tying common flags into C/C++ compiler settings
+CFLAGS += \$(COMMONFLAGS)
+CXXFLAGS += \$(COMMONFLAGS)
+
+EOF
+		;;
+	esac
+
+	case "${RPC_SUPPORT}" in
+	[yY]*)
+		cat << RPC_EOF
+# Sun RPC source/header file generation 
+RPC_HEADERS = \$(patsubst %.x,%.h,\$(RPC_FILES)) 
+RPC_CLIENT_SRC = \$(patsubst %.x,%_clnt.c,\$(RPC_FILES)) 
+RPC_SERVER_SRC = \$(patsubst %.x,%_svc.c,\$(RPC_FILES)) 
+RPC_XDR_SRC = \$(patsubst %.x,%_xdr.c,\$(RPC_FILES)) 
+
+RPC_GENERATED_FILES = \$(RPC_HEADERS) \$(RPC_CLIENT_SRC) \\
+                      \$(RPC_SERVER_SRC) \$(RPC_XDR_SRC) 
+
+C_FILES += \$(RPC_XDR_SRC) \$(RPC_CLIENT_SRC) \$(RPC_SERVER_SRC) 
+MAIN_C_FILES += \$(RPC_SERVER_SRC) 
+OTHER_C_FILES += \$(RPC_XDR_SRC) 
+
+.SECONDARY: \$(RPC_GENERATED_FILES) 
+
+RPC_EOF
+		;;
+	esac
+
+	echo "# Generate the full list(s) of typed source files under our concern"
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		case "${DISABLE_CPP_SUPPORT}" in
+		[yY]*)
+			;;
+		*)
+			echo "CPP_FILES += \$(MAIN_CPP_FILES) \$(OTHER_CPP_FILES)"
+			;;
+		esac
+
+		case "$C_SUPPORT" in
+		[yY]*)
+			echo "C_FILES   += \$(MAIN_C_FILES) \$(OTHER_C_FILES)"
+			;;
+		esac
+
+		case "$OBJC_SUPPORT" in
+		[yY]*)
+			echo "OBJC_FILES   += \$(MAIN_OBJC_FILES) \$(OTHER_OBJC_FILES)"
+			;;
+		esac
+
+		;;
+	esac
+
+	case "$LEX" in
+	[yY]*)
+		echo "L_FILES = \$(MAIN_L_FILES) \$(OTHER_L_FILES)"
+		echo "L_HFILES = \$(patsubst %,%.h,\$(basename \$(L_FILES)))"
+		echo "L_CXXFILES = \$(patsubst %,%.cpp,\$(basename \$(L_FILES)))"
+		echo ".PRECIOUS: \$(L_HFILES)"
+		echo ".INTERMEDIATE: \$(L_CXXFILES)"
+		echo ""
+		;;
+	esac
+
+	case "$YACC" in
+	[yY]*)
+		echo "YACC_FILES = \$(MAIN_YACC_FILES) \$(OTHER_YACC_FILES)"
+		echo "YACC_HFILES = \$(patsubst %,%.tab.hpp,\$(basename \$(YACC_FILES)))"
+		echo "YACC_CXXFILES = \$(patsubst %,%.tab.cpp,\$(basename \$(YACC_FILES)))"
+		echo ""
+		echo "# Keep the header files generated from the YACC sources, "
+		echo "# but not the source files"
+		echo ".PRECIOUS: \$(YACC_HFILES) "
+		echo ".INTERMEDIATE: \$(YACC_CXXFILES) "
+		echo ""
+		;;
+	esac
+
+	case "$JAVA_SUPPORT" in
+	[yY]*)
+		echo "JAVA_FILES   = \$(MAIN_JAVA_FILES) \$(OTHER_JAVA_FILES)"
+		;;
+	esac
+	echo ""
+
+	echo "# Generate the master list of *all* source files under our concern"
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		echo "SOURCEFILES  += \$(HFILES) "
+		;;
+	esac
+	case "${DISABLE_CPP_SUPPORT}" in
+	[nN]*)
+		echo "SOURCEFILES  += \$(CPP_FILES) "
+		;;
+	esac
+	case "$C_SUPPORT" in
+	[yY]*)
+		echo "SOURCEFILES += \$(C_FILES) "
+		;;
+	esac
+	case "$OBJC_SUPPORT" in
+	[yY]*)
+		echo "SOURCEFILES += \$(OBJC_FILES) "
+		;;
+	esac
+	case "$LEX" in
+	[yY]*)
+		echo "SOURCEFILES += \$(L_FILES) "
+		;;
+	esac
+	case "$YACC" in
+	[yY]*)
+		echo "SOURCEFILES += \$(YACC_FILES) "
+		;;
+	esac
+	case "$JAVA_SUPPORT" in
+	[yY]*)
+		echo "SOURCEFILES += \$(JAVA_FILES) "
+		;;
+	esac
+	echo ""
+
+	echo "# The names of the applications are derived from the 'base names' "
+	echo "# for their respective source files (without extensions)"
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		case "${C_SUPPORT}" in
+		[yY]*)
+			echo "MAIN_C_BASES =   \$(basename \$(MAIN_C_FILES))"
+			;;
+		esac
+
+		case "${OBJC_SUPPORT}" in
+		[yY]*)
+			echo "MAIN_OBJC_BASES =   \$(basename \$(MAIN_OBJC_FILES))"
+			;;
+		esac
+
+		case "${DISABLE_CPP_SUPPORT}" in
+		[yY]*)
+			;;
+		*)
+			echo "MAIN_CPP_BASES = \$(basename \$(MAIN_CPP_FILES))"
+			;;
+		esac
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	[yY]*)
+		echo "MAIN_JAVA_BASES =   \$(basename \$(MAIN_JAVA_FILES))"
+		;;
+	esac
+	echo ""
+
+	echo "# Figure out the 'base names' of the other source files"
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		case "${C_SUPPORT}" in
+		[yY]*)
+			echo "OTHER_C_BASES =  \$(basename \$(OTHER_C_FILES))"
+			;;
+		esac
+
+		case "${OBJC_SUPPORT}" in
+		[yY]*)
+			echo "OTHER_OBJC_BASES =  \$(basename \$(OTHER_OBJC_FILES))"
+			;;
+		esac
+
+		case "${DISABLE_CPP_SUPPORT}" in
+		[yY]*)
+			;;
+		*)
+			echo "OTHER_CPP_BASES = \$(basename \$(OTHER_CPP_FILES))"
+			;;
+		esac
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	[yY]*)
+		echo "OTHER_JAVA_BASES =   \$(basename \$(OTHER_JAVA_FILES))"
+		;;
+	esac
+	echo ""
+
+	echo "# Here's the (type-specific) list of base names for all source files"
+	case "${C_SUPPORT}" in
+	[yY]*)
+		echo "C_BASES    = \$(MAIN_C_BASES) \$(OTHER_C_BASES)"
+		;;
+	esac
+
+	case "${OBJC_SUPPORT}" in
+	[yY]*)
+		echo "OBJC_BASES    = \$(MAIN_OBJC_BASES) \$(OTHER_OBJC_BASES)"
+		;;
+	esac
+
+	case "${DISABLE_CPP_SUPPORT}" in
+	[nN]*)
+		echo "CPP_BASES  = \$(MAIN_CPP_BASES) \$(OTHER_CPP_BASES)"
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	[yY]*)
+		echo "JAVA_BASES = \$(MAIN_JAVA_BASES) \$(OTHER_JAVA_BASES)"
+		;;
+	esac
+	echo ""
+
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		echo "# Build a list of the names of all applications this makefile can produce"
+		case "${DISABLE_CPP_SUPPORT}" in
+		[yY]*)
+			;;
+		*)
+			echo "APPS += \$(patsubst %,\$(EXEDIR)/%,\$(MAIN_CPP_BASES)) "
+			;;
+		esac
+
+		case "${C_SUPPORT}" in
+		[yY]*)
+			echo "APPS += \$(patsubst %,\$(EXEDIR)/%,\$(MAIN_C_BASES)) "
+			;;
+		esac
+
+		case "${OBJC_SUPPORT}" in
+		[yY]*)
+			echo "APPS += \$(patsubst %,\$(EXEDIR)/%,\$(MAIN_OBJC_BASES)) "
+			;;
+		esac
+
+		case "$LEX" in
+		[yY]*)
+			echo "APPS += \$(patsubst %,\$(EXEDIR)/%,\$(basename \$(MAIN_L_FILES))) "
+			;;
+		esac
+		echo ""
+
+		case "$YACC" in
+		[yY]*)
+			echo "APPS += \$(patsubst %,\$(EXEDIR)/%,\$(basename \$(MAIN_YACC_FILES))) "
+			;;
+		esac
+		echo ""
+
+		echo "# Figure out the names of all of the compiled files"
+		case "${DISABLE_CPP_SUPPORT}" in
+		[yY]*)
+			;;
+		*)
+			echo "MAIN_OBJFILES =  \$(MAIN_CPP_BASES:%=\$(OBJDIR)/%.\$(OBJEXT)) "
+			;;
+		esac
+		case "$LEX" in
+		[yY]*)
+			echo "MAIN_OBJFILES += \$(patsubst %,\$(OBJDIR)/%.\$(OBJEXT),\$(basename \$(MAIN_L_FILES))) "
+			;;
+		esac
+		case "$YACC" in
+		[yY]*)
+			echo "MAIN_OBJFILES += \$(patsubst %,\$(OBJDIR)/%.tab.\$(OBJEXT),\$(basename \$(MAIN_YACC_FILES))) "
+			;;
+		esac
+		case "${C_SUPPORT}" in
+		[yY]*)
+			echo "MAIN_OBJFILES += \$(MAIN_C_BASES:%=\$(OBJDIR)/%.\$(OBJEXT)) "
+			;;
+		esac
+		case "${OBJC_SUPPORT}" in
+		[yY]*)
+			echo "MAIN_OBJFILES += \$(MAIN_OBJC_BASES:%=\$(OBJDIR)/%.\$(OBJEXT)) "
+			;;
+		esac
+
+		case "${DISABLE_CPP_SUPPORT}" in
+		[yY]*)
+			;;
+		*)
+			echo "OTHER_OBJFILES =  \$(OTHER_CPP_BASES:%=\$(OBJDIR)/%.\$(OBJEXT)) "
+			;;
+		esac
+		case "$LEX" in
+		[yY]*)
+			echo "OTHER_OBJFILES += \$(patsubst %,\$(OBJDIR)/%.\$(OBJEXT),\$(basename \$(OTHER_L_FILES))) "
+			;;
+		esac
+		case "$YACC" in
+		[yY]*)
+			echo "OTHER_OBJFILES += \$(patsubst %,\$(OBJDIR)/%.tab.\$(OBJEXT),\$(basename \$(OTHER_YACC_FILES))) "
+			;;
+		esac
+		case "${C_SUPPORT}" in
+		[yY]*)
+			echo "OTHER_OBJFILES += \$(OTHER_C_BASES:%=\$(OBJDIR)/%.\$(OBJEXT))"
+			;;
+		esac
+		case "${OBJC_SUPPORT}" in
+		[yY]*)
+			echo "OTHER_OBJFILES += \$(OTHER_OBJC_BASES:%=\$(OBJDIR)/%.\$(OBJEXT))"
+			;;
+		esac
+
+		echo "OBJFILES = \$(MAIN_OBJFILES) \$(OTHER_OBJFILES)"
+		echo ""
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	[yY]*)
+		echo "CLASSFILES =   \$(MAIN_JAVA_BASES:%=\$(CLASSDIR)/%.class) \\"
+		echo "               \$(OTHER_JAVA_BASES:%=\$(CLASSDIR)/%.class)"
+		;;
+	esac
+	echo ""
+
+	case "${C_FAMILY_ENABLED}" in
+	[yY]*)
+		echo "# Figure out how we're going to cache dependency information"
+		case "${DISABLE_CPP_SUPPORT}" in
+		[yY]*)
+			;;
+		*)
+			echo "DEPS_FILES =  \$(CPP_BASES:%=\$(OBJDIR)/%.d) "
+			;;
+		esac
+
+		case "${C_SUPPORT}" in
+		[yY]*)
+			echo "DEPS_FILES += \$(C_BASES:%=\$(OBJDIR)/%.d) "
+			;;
+		esac
+
+		case "${OBJC_SUPPORT}" in
+		[yY]*)
+			echo "DEPS_FILES += \$(OBJC_BASES:%=\$(OBJDIR)/%.d) "
+			;;
+		esac
+
+		echo ""
+		;;
+	esac
+
+	case "${EXTRAS_ON}" in
+	[yY]*)
+		emit_extra_auto_macros
+		;;
+	esac
+	
+	case "${DOCBOOK_SUPPORT}" in
+	[yY]*)
+		emit_extra_docbook_macros
+		;;
+	esac
+
+	echo ""
+}
+
+
+###########################################################################
+# Emits the implicit rules for converting Docbook content into other formats
+emit_docbook_implicit_rules() {
+	cat << EOF
+# Convert DocBook files that use "XML include" elements into their 
+# fully-resolved form
+resolved/%_resolved.xml: %.xml
+	mkdir -p \`dirname "\$@"\`
+	\$(XMLLINT) --xinclude \$*.xml > \$@
+
+
+# Convert fully-resolved DocBook files into XSL-FO format
+\$(FO_DIR)/%.fo: resolved/%_resolved.xml resolved/docbook_fo_custom_resolved.xsl
+	@echo "\$@...."
+	DEST_DIR=\`dirname "\$@"\` ; \\
+		mkdir -p \$\$DEST_DIR && \\
+		case "\$(LOCAL_DOCBOOK_XSL_ROOT)" in \\
+		'') mkdir -p \$\$DEST_DIR/images ; \\
+			XSL=\$(DOCBOOK_XSL_URI)/\$(FO_XSL_SUBPATH) ; \\
+			;; \\
+		*)  cp -r \$(DOCBOOK_XSL_ROOT)/images \$\$DEST_DIR ; \\
+			XSL=resolved/docbook_fo_custom_resolved.xsl ; \\
+			;; \\
+		esac && \\
+		if [ -d images ] ; then \\
+			cp -r images/* \$\$DEST_DIR/images/ ; \\
+			find \$\$DEST_DIR/images -type f | xargs chmod 665 ; \\
+		fi && \\
+		\$(XSLTPROC) \$(XSLTPROCPARAMS) \\
+			\$\$XSL "resolved/\$*_resolved.xml" > "\$@" ; \\
+		case "\$\$?" in \\
+		0)	;; \\
+		*)	rm -f "\$@" ; exit 1 ;; \\
+		esac
+
+
+# Show a GUI-based preview of an XSL-FO file
+%.preview: \$(FO_DIR)/%.fo
+	@if [ "\$(FOP_DIR)" != "" ] ; then \\
+		\$(FOP) -fo \$(FO_DIR)/\$*.fo -awt ; \\
+	else \\
+		echo "Error: 'FOP_DIR' is not set!" ; \\
+		exit 1 ; \\
+	fi
+
+
+# Convert XSL-FO files into PDF
+\$(PDF_DIR)/%.pdf: \$(FO_DIR)/%.fo
+	@echo "\$@...."
+	if [ "\$(FOP_DIR)" != "" ] ; then \\
+		mkdir -p \`dirname "\$@"\` ; \\
+		\$(FOP_HEADLESS) -fo \$^ -pdf \$@ ; \\
+	else \\
+		echo "Error: 'FOP_DIR' is not set!" ; \\
+		exit 1 ; \\
+	fi
+
+
+# Convert fully-resolved DocBook files into HTML format
+\$(HTML_DIR)/%.html: resolved/%_resolved.xml docbook.css 
+	@echo "\$@...."
+	DEST_DIR=\`dirname "\$@"\` ; \\
+		mkdir -p \`dirname "\$@"\` && \\
+		case "\$(LOCAL_DOCBOOK_XSL_ROOT)" in \\
+		'') mkdir -p \$\$DEST_DIR/images ;; \\
+		*)  cp -r \$(LOCAL_DOCBOOK_XSL_ROOT)/images \$\$DEST_DIR ;; \\
+		esac && \\
+		if [ -d images ] ; then \\
+			cp -r images/* \$\$DEST_DIR/images/ ; \\
+			find \$\$DEST_DIR/images -type f | xargs chmod 666 ; \\
+		fi && \\
+		cp docbook.css \$\$DEST_DIR/ && \\
+		\$(XSLTPROC) \$(XSLTPROC_PARAMS) \\
+		    "\$(DOCBOOK_XSL_ROOT)/\$(XHTML_XSL_SUBPATH)" "resolved/\$*_resolved.xml" > "\$@" ; \\
+		case "\$\$?" in \\
+		0)	;; \\
+		*)	rm -f "\$@" ; exit 1 ;; \\
+		esac
+
+
+# Convert fully-resolved DocBook files into "chunked" HTML format
+\$(CHUNKED_HTML_DIR)/%/index.html: resolved/%_resolved.xml docbook.css strip.sh 
+	@echo "\$@...."
+	DEST_DIR=\`dirname "\$@"\` ; \\
+		mkdir -p \`dirname "\$@"\` && \\
+		case "\$(LOCAL_DOCBOOK_XSL_ROOT)" in \\
+		'') mkdir -p \$\$DEST_DIR/images ;; \\
+		*)  cp -r \$(LOCAL_DOCBOOK_XSL_ROOT)/images \$\$DEST_DIR ;; \\
+		esac && \\
+		if [ -d images ] ; then \\
+			cp -r images/* \$\$DEST_DIR/images/ ; \\
+			find \$\$DEST_DIR/images -type f | xargs chmod 666 ; \\
+		fi && \\
+		cp docbook.css \$\$DEST_DIR/ && \\
+		STARTDIR=\`pwd\` ; \\
+		cd \`dirname "\$@"\` ; \\
+		\$(XSLTPROC) \$(XSLTPROC_PARAMS) \\
+			"\$(DOCBOOK_XSL_ROOT)/\$(XHTML_CHUNK_XSL_SUBPATH)" \\
+			"\$\$STARTDIR/resolved/\$*_resolved.xml" ; \\
+		cd \$\$STARTDIR ; \\
+		case "\$\$?" in \\
+		0)	;; \\
+		*)	rm -f "\$@" ; exit 1 ;; \\
+		esac 
+	DEST_DIR=\`dirname "\$@"\` ; \\
+		for f in \$\$DEST_DIR/*.html ; do \\
+			./strip.sh < \$\$f > \$\$f.tmp && mv \$\$f.tmp \$\$f ; \\
+			case "\$\$?" in \\
+			0)	;; \\
+			*)	rm -f "\$@" ; exit 1 ;; \\
+			esac ; \\
+		done ; \\
+		true
+
+EOF
+}
+
+
+###########################################################################
+# Emits the implicit rules for compiling C-based languages for a specific 
+# language/file type
+emit_c_family_implicit_rules() {
+	case "${C_FAMILY_ENABLED}" in
+	[nN]*)
+		return
+		;;
+	esac
+
+	case "$2" in
+	'')	return ;;
+	*)	extension=$2 ;;
+	esac
+
+	case "$1" in
+	[cC]++|[cC][pP][pP])
+		language=C++
+		flags=CXXFLAGS
+		compiler=CXX
+		;;
+	[oO][bB][jJ][cC])
+		language=Objective-C
+		flags=OBJCFLAGS
+		compiler=OBJCC
+		;;
+	C|c)
+		language=C
+		flags=CFLAGS
+		compiler=CC
+		;;
+	*)
+		echo "*** Unsupported language (for implicit rules): ${1}" 1>&2
+		return
+		;;
+	esac
+
+	cat << EOF
+# Compiling ${language} code in ".${extension}" files
+\$(OBJDIR)/%.\$(OBJEXT): %.${extension}
+	@echo "\$@"
+	@if [ ! -d \$(OBJDIR) ] ; then mkdir -p \$(OBJDIR) ; fi
+	\$(${compiler}) \$(${flags}) -c \$< -o \$@
+
+EOF
+}
+
+
+###########################################################################
+# Emits the implicit rules for capturing the output from the C preprocessor
+# for a specific language/file type
+emit_c_preproc_implicit_rules() {
+
+	case "${C_FAMILY_ENABLED}" in
+	[nN]*)
+		return
+		;;
+	esac
+
+	case "$2" in
+	'')	return ;;
+	*)	extension=$2 ;;
+	esac
+
+	case "$1" in
+	[cC]++|[cC][pP][pP])
+		language=C++
+		flags=CXXFLAGS
+		;;
+	C|c)
+		language=C
+		flags=CFLAGS
+		;;
+	[oO][bB][jJ][cC])
+		language=Objective-C
+		flags=OBJCFLAGS
+		compiler=OBJCC
+		;;
+	*)
+		echo "*** Unsupported language (for preproc implicit rules): ${1}" 1>&2
+		return
+		;;
+	esac
+
+	CFLAGS_NAME=$2
+
+	cat << EOF
+# Capturing the results of running the C preprocessor against
+# a ".${extension}" file
+%.${extension}.out: %.${extension}
+	@echo "\$@"
+	\$(CPP) \$(${flags}) -c \$< > \$@
+
+EOF
+}
+
+
+###########################################################################
+# Emits all of the implicit rules to be stored in the Makefile
+emit_implicit_rules() {
+
+	cat <<-EOF
+	####
+	#### Implicit rules, telling make/gmake how to create one kind of file 
+	#### from another kind of file (e.g. how to create "foo.o" from 
+	#### "foo.cpp")
+	####
+
+EOF
+
+	case "$C_SUPPORT" in
+	[yY]*)
+		emit_c_family_implicit_rules c c
+		;;
+	esac
+
+	case "$OBJC_SUPPORT" in
+	[yY]*)
+		emit_c_family_implicit_rules objc m
+		;;
+	esac
+
+	case "${DISABLE_CPP_SUPPORT}" in
+	[yY]*)
+		;;
+	*)
+		emit_c_family_implicit_rules c++ cpp
+		case "${FULL_CPP_SUPPORT}" in
+		Y*)
+			emit_c_family_implicit_rules c++ cp
+			emit_c_family_implicit_rules c++ C
+			;;
+		esac
+		case "${NOCASE_ON}" in
+		Y*)
+			emit_c_family_implicit_rules c++ CPP
+			case "${FULL_CPP_SUPPORT}" in
+			Y*)
+				emit_c_family_implicit_rules c++ CP
+				;;
+			esac
+			;;
+		esac
+		;;
+	esac
+
+	case "${RPC_SUPPORT}" in
+	Y*)
+		cat << EOF_RPC
+# Translating ONC RPC definition files into C source (for compilation)
+%.h: %.x
+	echo "Generating \$@..."
+	rpcgen -h \$< > \$@
+%_xdr.c : %.x %.h 
+	echo "Generating \$@..."
+	rpcgen -c \$< > \$@
+%_clnt.c : %.x %.h 
+	echo "Generating \$@..."
+	rpcgen -l \$< > \$@ 
+%_svc.c : %.x %.h 
+	echo "Generating \$@..."
+	rpcgen -s udp -s tcp  \$< > \$@
+
+EOF_RPC
+		;;
+	esac
+
+	case "${JAVA_SUPPORT}" in
+	[Yy]*)
+		cat << EOF_JAVA
+# Compiling Java code in ".java" files: note that the compiler will handle 
+# any sub-directories for packages
+\$(CLASSDIR)/%.class: %.java
+	@echo "\$@"
+	@mkdir -p "\$(CLASSDIR)"
+	\$(JAVAC) \$(JAVACFLAGS) \$*.java
+
+EOF_JAVA
+		;;
+	esac
+
+	case "$PREPROC" in
+	[yY]*)
+		case "${DISABLE_CPP_SUPPORT}" in
+		[yY]*)
+			;;
+		*)
+			emit_c_preproc_implicit_rules c++ cpp 
+			case "${FULL_CPP_SUPPORT}" in
+			Y*)
+				emit_c_preproc_implicit_rules c++ cp 
+				emit_c_preproc_implicit_rules c++ C 
+				;;
+			esac
+			;;
+		esac
+
+		case "$C_SUPPORT" in
+		[yY]*)
+			emit_c_preproc_implicit_rules c c
+			;;
+		esac
+
+		case "$OBJC_SUPPORT" in
+		[yY]*)
+			emit_c_preproc_implicit_rules objc m
+			;;
+		esac
+
+		case "${NOCASE_ON}" in
+		Y*)
+			case "${DISABLE_CPP_SUPPORT}" in
+			[yY]*)
+				;;
+			*)
+				emit_c_preproc_implicit_rules c++ CPP
+				case "${FULL_CPP_SUPPORT}" in
+				Y*)
+					emit_c_preproc_implicit_rules c++ CP
+					;;
+				esac
+				;;
+			esac
+			;;
+		esac
+		;;
+	esac
+
+	case "$SHPROC" in
+	[yY]*)
+		cat << EOF_SHPROC
+%: %.sh
+	\$(CPP) \$*.sh \$@
+	chmod +x \$@
+
+EOF_SHPROC
+		;;
+	esac
+	
+	case "${DOCBOOK_SUPPORT}" in
+	[yY]*)	emit_docbook_implicit_rules 
+			;;
+	esac
+
+	case "$LEX" in
+	[yY]*)
+		cat << EOF_LEX
+%.cpp: %.lxx
+	\$(LEX) \$(LEXARGS)  -o "\$@" "\$^"
+
+# Note that this produce both the .cpp file for the lexer and the .h file, 
+# even if one or the other files already exists.  This means that you need 
+# to be sure that your base file names don't conflict!
+%.cpp %.h: %.lxx
+	base=\$(basename \$^) && \
+		\$(LEX) \$(LEXARGS) --header-file="\$\${base}.h" -o "\$\${base}.cpp" "\$^"
+
+EOF_LEX
+		;;
+	esac
+
+	case "$YACC" in
+	[yY]*)
+		cat << EOF_YACC
+%.tab.cpp %.tab.hpp: %.ypp
+	\$(YACC) \$(YACCARGS)  -d "\$^"
+
+EOF_YACC
+		;;
+	esac
+
+	echo ""
+}
+
+
+###########################################################################
+# Emits the utility targets (and some support stuff) for automatically 
+# generating dependency information
+emit_dependency_info() {
+	cat <<-EOF
+	####
+	#### Dependency management (courtesy of some intelligence in gcc.... ;-)
+	####
+
+EOF
+
+	case "${C_SUPPORT}" in
+	[yY]*)
+		echo "CFLAGS += -MP -MMD "
+		;;
+	esac
+	case "${OBJC_SUPPORT}" in
+	[yY]*)
+		echo "OBJCFLAGS += -MP -MMD "
+		;;
+	esac
+
+	case "${DISABLE_CPP_SUPPORT}" in
+	[yY]*)
+		;;
+	*)
+		echo "CXXFLAGS +=  -MP -MMD "
+		;;
+	esac
+
+	cat <<-EOF
+
+	-include \$(DEPS_FILES)
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits the utility targets for supporting code reviews
+emit_code_review_support() {
+	cat << EOF
+####
+# Some code review support
+#
+
+findTodos:
+	@echo "Unimplemented code:"
+	@find . -name '*.[cmh]*' -exec fgrep -n -H NOT_IMPLEMENTED {} \; || true
+	@echo ""
+	@echo "Code review issues:"
+	@find . -name '*.[cmh]*' -exec fgrep -n -H CODE_REVIEW {} \; || true
+	@echo ""
+	@echo "To-do items:"
+	@(\
+	    find . -name '*.[cmh]*' -exec fgrep -n -H TODO {} \; ; \\
+	    find . -name '*.[cmh]*' -exec fgrep -n -H @todo {} \; ; \\
+	    find . -name '*.[cmh]*' -exec fgrep -n -H @bug {} \; ; \\
+	    find . -name '*.xml' -exec fgrep -n -H 'TODO:' {} \; \\
+	  ) | fgrep -v /.svn/ | sort -u
+	@echo ""
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits the utility targets for supporting OS X build tools (Xcode projects, 
+# etc.)
+emit_osx_tools_support() {
+	cat << EOF
+#
+# Some support for automating builds driven by Apple's standard tools for OS X 
+# (i.e., Xcode and Project Builder)
+#
+
+# Main entry point, which figures out whether the command-line form of Xcode 
+# or Project Builder should be invoked (and does a hand-off to a sub-target 
+# that will use that tool to get the job done)
+#
+# Sample usage within this makefile:
+# 
+#   target: dependencies....
+#       \$(MAKE) buildModule "MODULES=IOM PBM PM PDE" SRC_DIR=src/PrinterPlugins
+#
+# The assumption is that the targets within the project being built are 
+# specified in the "MODULES=..." list, and either a "AppName.pbproj" 
+# (Xcode or Project Builder) or "AppName.xcode" (Xcode only) bundle will be
+# found in the "src/AppName" folder.
+buildModule:
+	if [ \( "\$(MODULES)" = "" \) -o  \( "\$(SRC_DIR)" = "" \) ] ; \\
+	then \\
+		echo 'Need to specify MODULES=XYZ SRC_DIR=ABC' ; \\
+	else \\
+		case "\`which xcodebuild 2>&1\`" in \\
+			[nN][oO]*|*'not found'*|'') \\
+				make buildPBX "MODULES=\$(MODULES)" "SRC_DIR=\$(SRC_DIR)" ; \\
+				lastResult=\$\$? ; \\
+				;; \\
+			*) \\
+				make buildXCode "MODULES=\$(MODULES)" "SRC_DIR=\$(SRC_DIR)" ; \\
+				lastResult=\$\$? ; \\
+				;; \\
+		esac ; \\
+		case "\$\$lastResult" in \\
+			0)	;; \\
+			*)	exit 1 ;; \\
+		esac ; \\
+	fi
+
+# Converts the modules specified by 'buildModule' (or the user) into a 
+# Project Builder target list
+PBX_TARGET_LIST=\$(patsubst %, -target %, \$(MODULES))
+
+# Runs Project Builder's command-line tool in order to execute a build
+buildPBX:
+	if [ \( "\$(MODULES)" = "" \) -o  \( "\$(SRC_DIR)" = "" \) ] ; \\
+	then \\
+		echo 'Need to specify MODULES=XYZ SRC_DIR=ABC' ; \\
+	else \\
+		cd "\$(SRC_DIR)" ; \\
+		TMP=/var/tmp/build.\$\$\$\$ ; \\
+		case "\$(MODE)" in \\
+			release) pbxbuild \$(PBX_TARGET_LIST) \$(BUILDMODE_REL) ;; \\
+			debug) pbxbuild \$(PBX_TARGET_LIST) \$(BUILDMODE_DBG) ;; \\
+			purge) pbxbuild \$(PBX_TARGET_LIST) \$(BUILDMODE) clean ;; \\
+			*) pbxbuild \$(PBX_TARGET_LIST) \$(BUILDMODE) \$(MODE) ;; \\
+		esac 2>&1 | tee \$\$TMP | c++filt ; \\
+		if grep -s '** BUILD FAILED **' \$\$TMP > /dev/null ; \\
+		then echo "Build failed" ; rm -f \$\$TMP ; exit 1 ; \\
+		fi ; \\
+		rm -f \$\$TMP ; \\
+	fi ; exit 0
+
+# Runs Xcode's command-line tool in order to execute a build, after first 
+# looking for either a ".xcodeproj" (Xcode 2.1+), ".xcode" (Xcode 1.0+), 
+# or ".pbproj" (Project Builder) folder that is assumed to contain the 
+# targeted project file. 
+buildXCode:
+	if [ \( "\$(MODULES)" = "" \) -o  \( "\$(SRC_DIR)" = "" \) ] ; \\
+	then \\
+		echo 'Need to specify MODULES=XYZ SRC_DIR=ABC' ;  exit 1 ; \\
+	else \\
+		cd "\$(SRC_DIR)" ; \\
+		XCODE_PROJ=\`ls -d *.xcodeproj 2>/dev/null\` ; \\
+		case "\$\$XCODE_PROJ" in \\
+			'')	\\
+				XCODE_PROJ=\`ls -d *.xcode 2>/dev/null\` ; \\
+				;; \\
+		esac ; \\
+		case "\$\$XCODE_PROJ" in \\
+			'')	\\
+				XCODE_PROJ=\`ls -d *.pbproj 2>/dev/null\` ; \\
+				;; \\
+		esac ; \\
+		case "\$\$XCODE_PROJ" in \\
+			'')	echo "Can't find project bundle in \$(SRC_DIR)...." ; \\
+				exit 1 ; \\
+				;; \\
+		esac ; \\
+		TMP=/var/tmp/build.\$\$\$\$ ; \\
+		case "\$(MODE)" in \\
+			release) \\
+				xcodebuild -project \$\$XCODE_PROJ \\
+						   \$(PBX_TARGET_LIST) \$(BUILDMODE_REL) ; \\
+				;; \\
+			debug) \\
+				xcodebuild -project \$\$XCODE_PROJ \\
+						   \$(PBX_TARGET_LIST) \$(BUILDMODE_DBG) ; \\
+				;; \\
+			purge) \\
+				xcodebuild -project \$\$XCODE_PROJ \\
+						   \$(PBX_TARGET_LIST) \$(BUILDMODE) clean ; \\
+				;; \\
+			*) \\
+				xcodebuild -project \$\$XCODE_PROJ \\
+						   \$(PBX_TARGET_LIST) \$(BUILDMODE) \$(MODE) ; \\
+				;; \\
+		esac 2>&1 | tee \$\$TMP | c++filt ; \\
+		if grep -s 'xcodebuild: Error' \$\$TMP > /dev/null ; \\
+		then rm -f \$\$TMP ; exit 1 ; \\
+		fi ; \\
+		if grep -s '** BUILD FAILED **' \$\$TMP > /dev/null ; \\
+		then rm -f \$\$TMP ; exit 1 ; \\
+		fi ; \\
+		rm -f \$\$TMP ; \\
+	fi
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits the utility targets used together with CVS
+emit_cvs_support() {
+		cat << EOF
+####
+# Some CVS support functionality
+#
+diff: cvs-diff
+
+cvs-diff:
+	@make cvs-diffDir DIFF_DIR=.
+
+cvs-diffDir:
+	@if [ "\$(DIFF_DIR)" = "" ] ; then \\
+		echo "Forgot to set DIFF_DIR=XYZ!" ; \\
+	else \\
+		FILE=/tmp/diff\$\$\$\$.txt ; \\
+		cd "\$(DIFF_DIR)" ; \\
+		cvs diff > \$\$FILE ; \\
+		if [ "\$\$OS" = "Windows_NT" ] ; then \\
+			write \`cygpath -w "\$\$FILE"\` ; sleep 3 ; \\
+		elif [ "\$\$OS_TYPE" = "MACOSX" ] ; then \\
+			open "\$\$FILE" ; sleep 3 ; \\
+		else \\
+			vi \$\$FILE ; \\
+		fi ; \\
+		\$(RM) \$\$FILE ; \\
+	fi
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits targets to support version identification strings in Java
+emit_svn_version_java_support() {
+		cat << EOF
+# The following files (SvnVersion.java) can be included into a build in order 
+# to provide a string that can identify the version number associated with 
+# the source code used to generate the build.
+SvnVersion.java: updateSvnVersion_java
+
+SVN_BASE_DIR=.
+updateSvnVersion_java:
+	which svnversion > /dev/null 
+	@(cd "\$(SVN_BASE_DIR)" ; printf "/* Note: This file is auto-generated, and should not be manually updated or version controlled. */\\n\\nclass SvnVersion {\\n static public final String SVN_VERSION_TEXT = \\"%s\\";\\n}\\n" "\`svnversion\`") > svn_version_foo.tmp
+	@cmp -s svn_version_foo.tmp SvnVersion.java || (cp svn_version_foo.tmp SvnVersion.java ; echo "Updated SVN version text")
+	@\$(RM) svn_version_foo.tmp
+
+EOF
+
+}
+
+
+###########################################################################
+# Emits targets to support version identification strings in C-based code
+emit_svn_version_c_support() {
+		cat << EOF
+# The following files (svnVersionText.[ch]) can be included into a build 
+# in order to provide a string that can identify the version number 
+# associated with the source code used to generate the build.
+svnVersionText.c: svnVersionText.h updateSvnVersion_c
+svnVersionText.h:
+	@printf "/* Note: This file is auto-generated, and should not be manually updated or version controlled. */\\n#ifndef SVN_VERSION_H\\n#define SVN_VERSION_H\\n\\n#ifdef __cplusplus\\nextern C {\\n#endif\\nextern const char * SVN_VERSION_TEXT;\\n#ifdef __cplusplus\\n}\\n#endif\\n\\n#endif\\n" > \$@
+
+SVN_BASE_DIR=.
+updateSvnVersion_c:
+	which svnversion > /dev/null 
+	@(cd "\$(SVN_BASE_DIR)" ; printf "/* Note: This file is auto-generated, and should not be manually updated or version controlled. */\\n#include \\"svnVersionText.h\\"\\n\\nconst char * SVN_VERSION_TEXT = \\"%s\\";\\n\\n" "\`svnversion\`") > svn_version_foo.tmp
+	@cmp -s svn_version_foo.tmp svnVersionText.c || (cp svn_version_foo.tmp svnVersionText.c ; echo "Updated SVN version text")
+	@\$(RM) svn_version_foo.tmp
+
+EOF
+
+}
+
+
+###########################################################################
+# Emits the utility targets used together with Subversion
+emit_svn_support() {
+		cat << EOF
+####
+# Some Subversion support functionality
+#
+diff: svn-diff
+
+svn-diff:
+	@make svn-diffDir DIFF_DIR=.
+
+svn-diffDir:
+	@if [ "\$(DIFF_DIR)" = "" ] ; then \\
+		echo "Forgot to set DIFF_DIR=XYZ!" ; \\
+	else \\
+		FILE=/tmp/diff\$\$\$\$.txt ; \\
+		cd "\$(DIFF_DIR)" ; \\
+		svn diff > \$\$FILE ; \\
+		if [ "\$\$OS" = "Windows_NT" ] ; then \\
+			write \`cygpath -w "\$\$FILE"\` ; sleep 3 ; \\
+		elif [ "\$\$OS_TYPE" = "MACOSX" ] ; then \\
+			open "\$\$FILE" ; sleep 3 ; \\
+		else \\
+			vi \$\$FILE ; \\
+		fi ; \\
+		\$(RM) \$\$FILE ; \\
+	fi
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits the utility targets used with simple (diff-based) unit testing
+emit_testing_support() {
+	cat << EOF
+#
+# Unit testing support
+#
+unitTest: \$(TEST_APPS)
+	@echo "You need to add the commands to define tests to run!"
+
+genBaseline: \$(TEST_APPS)
+	\$(MAKE) \$(TEST) > .\$(TEST).baseline 2>&1
+
+diffTest: \$(TEST_APPS)
+	@if [ ! -f .\$(TEST).baseline ] ; \\
+	then \\
+		echo "Baseline file '.\$(NAME).baseline' is missing!" ; \\
+	else \\
+		FILE=/tmp/\$\$.test1 ; DIFF=/tmp/\$\$.diff ; \\
+		\$(MAKE) \$(TEST) > \$\$FILE 2>&1 ; \\
+		if ! diff \$\$FILE .\$(TEST).baseline > \$\$DIFF ; \\
+		then \\
+			( echo "ERROR: Test run doesn't match baseline:" ; cat \$\$DIFF ) | more ; \\
+		else \\
+			echo "OK: Test passed!" ; \\
+		fi ; \\
+		rm -f \$\$FILE \$\$DIFF ; \\
+	fi
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits the utility targets used to generate online documentation via 
+# the Doxygen tool chain
+emit_doxygen_support_targets() {
+	cat <<EOF
+####
+# Doxygen support targets
+#
+docs: \$(DOXYGEN_CONFIG_FILE) 
+	\$(DOXYGEN) \$(DOXYGEN_CONFIG_FILE)
+
+\$(DOXYGEN_CONFIG_FILE):
+	\$(DOXYGEN) -g \$(DOXYGEN_CONFIG_FILE)
+	sleep 5		# give the user a chance to read the info from doxygen
+
+
+EOF
+}
+
+
+###########################################################################
+# Emits additional common/convenience targets
+emit_beauty_targets() {
+	cat << EOF
+####
+# Code beautification targets
+#
+beautify:
+	for f in \$(SOURCEFILES) ; do \$(ASTYLE) \$(ASTYLE_FLAGS) \$\$f ; done
+
+
+EOF
+}
+
+###########################################################################
+# Emits additional common/convenience targets
+emit_extra_targets() {
+	cat << EOF
+####
+# Some additional (convenience) targets
+#
+rebuild: clean all 
+
+release:
+	@echo "Performing release mode build...."
+	make MODE=release all
+
+debug:
+	@echo "Performing debug mode build...."
+	make MODE=debug all
+
+
+EOF
+}
+
+
+###########################################################################
+# Processes arguments such as those from the command-line or the 
+# GMAKEMAKEINIT environment variable
+process_command_line_switch() {
+	case "$1" in
+		-header)
+			USE_HEADER_MAK=YES
+			;;
+		-no-header)
+			USE_HEADER_MAK=NO
+			;;
+		-silent)
+			SILENT=YES
+			;;
+		-no-silent)
+			SILENT=NO
+			;;
+		-no-debug)
+			DEBUG_ON=NO
+			;;
+		-d|-debug)
+			DEBUG_ON=YES
+			;;
+		-lex)
+			LEX=YES
+			;;
+		-no-lex)
+			LEX=NO
+			;;
+		-yacc)
+			YACC=YES
+			;;
+		-no-yacc)
+			YACC=NO
+			;;
+		-x11|-xwin)
+			XWIN=YES
+			;;
+		-no-x11|-no-xwin)
+			XWIN=NO
+			;;
+		-shproc)
+			SHPROC=YES
+			;;
+		-no-shproc)
+			SHPROC=NO
+			;;
+		-preproc)
+			PREPROC=YES
+			;;
+		-no-preproc)
+			PREPROC=NO
+			;;
+		-paranoid)
+			PARANOID=YES
+			;;
+		-no-paranoid)
+			PARANOID=NO
+			;;
+		-build-deps)
+			BUILD_DEPS_ON=YES
+			;;
+		-no-build-deps)
+			BUILD_DEPS_ON=NO
+			;;
+		-review|-reviews)
+			REVIEWS_ON=YES
+			;;
+		-no-review|-no-reviews)
+			REVIEWS_ON=NO
+			;;
+		-testing)
+			TESTING_ON=YES
+			;;
+		-no-testing)
+			TESTING_ON=NO
+			;;
+		-no-objc)
+			OBJC_SUPPORT=NO
+			;;
+		-objc)
+			OBJC_SUPPORT=YES
+			;;
+		-docbook)
+			DOCBOOK_SUPPORT=YES
+			;;
+		-no-docbook)
+			DOCBOOK_SUPPORT=NO
+			;;
+		-no-cpp)
+			DISABLE_CPP_SUPPORT=YES
+			;;
+		-cpp)
+			DISABLE_CPP_SUPPORT=NO
+			;;
+		-doxy|-doxygen)
+			DOXYGEN_ON=YES
+			;;
+		-no-doxy|-no-doxygen)
+			DOXYGEN_ON=NO
+			;;
+		-osx)
+			OSX_ON=YES
+			;;
+		-no-osx)
+			OSX_ON=NO
+			;;
+		-c)
+			C_SUPPORT=YES
+			;;
+		-no-c)
+			C_SUPPORT=NO
+			;;
+		-full-cpp)
+			FULL_CPP_SUPPORT=YES
+			;;
+		-no-full-cpp)
+			FULL_CPP_SUPPORT=NO
+			;;
+		-cvs)
+			CVS_ON=YES
+			;;
+		-no-cvs)
+			CVS_ON=NO
+			;;
+		-svn)
+			SVN_ON=YES
+			;;
+		-no-svn)
+			SVN_ON=NO
+			;;
+		-extras)
+			EXTRAS_ON=YES
+			;;
+		-no-extras)
+			EXTRAS_ON=NO
+			;;
+		-beauty)
+			BEAUTY_ON=YES
+			;;
+		-no-beauty)
+			BEAUTY_ON=NO
+			;;
+		-case)
+			NOCASE_ON=NO
+			;;
+		-no-case)
+			NOCASE_ON=YES
+			;;
+		-java)
+			JAVA_SUPPORT=YES
+			;;
+		-no-java)
+			JAVA_SUPPORT=NO
+			;;
+		-rpc)
+			RPC_SUPPORT=YES
+			DEDUCE_PLATFORM_SUPPORT=YES
+			;;
+		-no-rpc)
+			RPC_SUPPORT=NO
+			DEDUCE_PLATFORM_SUPPORT=YES
+			;;
+		-gfilt)
+			GFILT_SUPPORT=YES
+			;;
+		-no-gfilt)
+			GFILT_SUPPORT=NO
+			;;
+		-h|-help|--help)
+			usage ; exit 0
+			;;
+		-l*)
+			LIBRARY=`echo "$1" | sed -e 's/-l//'`
+			if [ "$LIBRARY" = "" ] ; then usage ; exit 1 ; fi
+			;;
+		-*)
+			echo "Error: Unknown parameter '$1'" 1>&2
+			usage ; exit 1;
+			;;
+		*)
+			break
+			;;
+	esac
+}
+
+
+###########################################################################
+# Dumps all of the identified settings (from command-line switches, etc.) 
+# for debugging purposes.
+dump_settings() {
+	echo "# LIBRARY=$LIBRARY"
+	echo "# DEBUG_ON=$DEBUG_ON"
+	echo "# LEX=$LEX"
+	echo "# YACC=$YACC"
+	echo "# XWIN=$XWIN"
+	echo "# PREPROC=$PREPROC"
+	echo "# SHPROC=$SHPROC"
+	echo "# SILENT=$SILENT"
+	echo "# PARANOID=$PARANOID"
+	echo "# USE_HEADER_MAK=$USE_HEADER_MAK"
+	echo "# BUILD_DEPS_ON=$BUILD_DEPS_ON"
+	echo "# CVS_ON=$CVS_ON"
+	echo "# SVN_ON=$SVN_ON"
+	echo "# REVIEWS_ON=$REVIEWS_ON"
+	echo "# TESTING_ON=$TESTING_ON"
+	echo "# DOXYGEN_ON=$DOXYGEN_ON"
+	echo "# EXTRAS_ON=$EXTRAS_ON"
+	echo "# BEAUTY_ON=$BEAUTY_ON"
+	echo "# NOCASE_ON=$NOCASE_ON"
+	echo "# OSX_ON=$OSX_ON"
+	echo "# JAVA_SUPPORT=$JAVA_SUPPORT"
+	echo "# C_SUPPORT=$C_SUPPORT"
+	echo "# FULL_CPP_SUPPORT=$FULL_CPP_SUPPORT"
+	echo "# DISABLE_CPP_SUPPORT=$DISABLE_CPP_SUPPORT"
+	echo "# RPC_SUPPORT=$RPC_SUPPORT"
+	echo "# OBJC_SUPPORT=$OBJC_SUPPORT"
+	echo "#"
+	echo "# C_FAMILY_ENABLED=$C_FAMILY_ENABLED"
+	echo "# DEDUCE_PLATFORM_SUPPORT=$DEDUCE_PLATFORM_SUPPORT"
+
+	echo ""
+}
+
+
+###########################################################################
+# 
+# "Main" application begins here
+#
+###########################################################################
+
+#
+# Parse environment settings
+#
+baseSettings=$GMAKEMAKEINIT
+while [ "$baseSettings" != "" ]
+do
+	# FINDME: This is a bit of a hack, since we won't be able to 
+	#         handle switches that span multiple "words", but it 
+	#         should work for now....
+	cmdSwitch=`echo "x$baseSettings" | \
+						sed -e 's/^x[ 	]*//' \
+						    -e 's/\([^ 	]*\).*/\1/' \
+			  `
+
+	baseSettings=`echo "x$baseSettings" | \
+						sed -e 's/^x[ 	]*[^ 	]*//' \
+			  `
+	process_command_line_switch "$cmdSwitch"
+done
+
+#
+# Parse the command line
+#
+while [ "$1" != "" ]
+do
+	flag=$1
+	case "$flag" in
+	-l)
+		# A hack, to simulate the old "-l libname" syntax
+		case "$2" in
+		-*)	;;
+		*)	flag=${1}${2}
+			shift
+			;;
+		esac
+	esac
+	process_command_line_switch "$flag"
+	shift
+done
+
+#
+# "Macro" settings evaluated
+#
+if [ "${DISABLE_CPP_SUPPORT}" = "YES" \
+		-a "${C_SUPPORT}" = "NO" \
+		-a "${OBJC_SUPPORT}" = "NO" ] ; then
+	C_FAMILY_ENABLED=NO
+else
+	C_FAMILY_ENABLED=YES
+fi
+
+case "$DUMP_SETTINGS" in
+[yY]*)
+	dump_settings
+	;;
+esac
+
+#
+# Build our source file list
+#
+
+# Pick up any files specified on the command line
+if [ $# -ne 0 ]; then
+	for f in $*; do
+		case `dirname $f` in
+		'.')	;;
+		*)		vpath_dirs="$vpath_dirs `dirname $f`"
+				f=`basename $f`
+				;;
+		esac
+
+		case $f in
+		*.c)
+			cfiles="$cfiles $f" ;;
+		*.cpp)
+			Cfiles="$Cfiles $f" ;;
+		*.cp|*.C)
+			case "${FULL_CPP_SUPPORT}" in
+			Y*)
+				Cfiles="$Cfiles $f" ;;
+			esac
+			;;
+		*.CP)
+			case "${NOCASE_ON}" in
+			Y*) Cfiles="$Cfiles $f" ;;
+			esac
+			;;
+		*.CPP)
+			case "${FULL_CPP_SUPPORT}" in
+			Y*)
+				case "${NOCASE_ON}" in
+				Y*) Cfiles="$Cfiles $f" ;;
+				esac
+				;;
+			esac
+			;;
+		*.java)
+			javaFiles="$javaFiles $f"
+			;;
+		*.l|*.lxx)	lfiles="$lfiles $f" ;;
+		*.y|*.ypp)	yfiles="$yfiles $f" ;;
+		*.h)	hfiles="$hfiles $f" ;;
+		*.H)	Hfiles="$Hfiles $f" ;;
+		*.x)	rpcFiles="$rpcFiles $f" ;;
+		*.m)	objcfiles="$objcfiles $f" ;;
+		*)	;;
+		esac
+	done
+fi
+
+# Now, add in any files in the current directory
+ls *.l *.lxx *.C *.cpp *.cp *.c *.CPP *.CP *.java *.x *.m *.y *.ypp  2>/dev/null \
+	| sort -u \
+	| tr -d "\\r" \
+	> ${SCRATCH_FILE}
+
+for f in `cat ${SCRATCH_FILE}` ; do
+	case $f in
+	\**)	;;
+	*.c)
+		cfiles="$cfiles $f" ;;
+	*.cpp)
+		Cfiles="$Cfiles $f" ;;
+	*.m)
+		objcfiles="$objcfiles $f" ;;
+	*.cp|*.C)
+		case "${FULL_CPP_SUPPORT}" in
+		Y*)
+			Cfiles="$Cfiles $f" ;;
+		esac
+		;;
+	*.CP)
+		case "${NOCASE_ON}" in
+		Y*) Cfiles="$Cfiles $f" ;;
+		esac
+		;;
+	*.CPP)
+		case "${FULL_CPP_SUPPORT}" in
+		Y*)
+			case "${NOCASE_ON}" in
+			Y*) Cfiles="$Cfiles $f" ;;
+			esac
+			;;
+		esac
+		;;
+	*.java)
+		javaFiles="$javaFiles $f"
+		;;
+	*.l|*.lxx)	lfiles="$lfiles $f" ;;
+	*.y|*.ypp)	yfiles="$yfiles $f" ;;
+	*.x)	rpcFiles="$rpcFiles $f" ;;
+	*)	;;
+	esac
+done 
+
+for f in *.H *.h; do
+	case $f in
+	\**)	;;
+	*.h)	hfiles="$hfiles $f" ;;
+	*.H)	Hfiles="$Hfiles $f" ;;
+	*)	;;
+	esac
+done
+
+# In case there are already some translated RPC files floating around, 
+# strip them out from the C and header file set
+case "${RPC_SUPPORT}" in
+[yY]*)
+	for file in $rpcFiles ; do
+		server_file=`echo "$file" | sed -e 's@\.x\$@_svc.c@'`
+		cfiles=`echo "$cfiles " | sed -e 's@'$server_file' @@'`
+
+		client_file=`echo "$file" | sed -e 's@\.x\$@_clnt.c@'`
+		cfiles=`echo "$cfiles " | sed -e 's@'$client_file' @@'`
+
+		xdr_file=`echo "$file" | sed -e 's@\.x\$@_xdr.c@'`
+		cfiles=`echo "$cfiles " | sed -e 's@'$xdr_file' @@'`
+
+		header_file=`echo "$file" | sed -e 's@\.x\$@.h@'`
+		hfiles=`echo "$hfiles " | sed -e 's@'$header_file' @@'`
+	done
+	;;
+esac
+
+
+#
+# Figure out which files include a "main" function and which don't
+#
+maincfiles=
+othercfiles=
+for f in $cfiles; do
+	matched_main=false
+
+	sed -e 's@//.*$@@' < $f > $SCRATCH_FILE2
+
+	if grep '[ 	]main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	elif grep '^main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	fi
+
+	case "$matched_main" in
+	true)
+		maincfiles="$maincfiles $f"
+		;;
+	false)
+		othercfiles="$othercfiles $f"
+		;;
+	esac
+done
+
+mainobjcfiles=
+otherobjcfiles=
+for f in $objcfiles; do
+	matched_main=false
+
+	sed -e 's@//.*$@@' < $f > $SCRATCH_FILE2
+
+	if grep '[ 	]main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	elif grep '^main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	fi
+
+	case "$matched_main" in
+	true)
+		mainobjcfiles="$mainobjcfiles $f"
+		;;
+	false)
+		otherobjcfiles="$otherobjcfiles $f"
+		;;
+	esac
+done
+
+mainCfiles=
+otherCfiles=
+for f in $Cfiles; do
+	matched_main=false
+
+	sed -e 's@//.*$@@' < $f > $SCRATCH_FILE2
+
+	if grep '[ 	]main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	elif grep '^main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	fi
+
+	case "$matched_main" in
+	true)
+		mainCfiles="$mainCfiles $f"
+		;;
+	false)
+		otherCfiles="$otherCfiles $f"
+		;;
+	esac
+done
+
+mainJavaFiles=
+otherJavaFiles=
+for f in $javaFiles; do
+	matched_main=false
+	if grep '[ 	]main[ 	]*(' $f > /dev/null 2>&1; then
+		matched_main=true
+	elif grep '^main[ 	]*(' $f > /dev/null 2>&1; then
+		matched_main=true
+	fi
+
+	case "$matched_main" in
+	true)
+		mainJavaFiles="$mainJavaFiles $f"
+		;;
+	false)
+		otherJavaFiles="$otherJavaFiles $f"
+		;;
+	esac
+done
+
+mainlfiles=
+otherlfiles=
+for f in $lfiles; do
+	matched_main=false
+
+	sed -e 's@//.*$@@' < $f > $SCRATCH_FILE2
+
+	if grep '[ 	]main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	elif grep '^main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	fi
+
+	case "$matched_main" in
+	true)
+		mainlfiles="$mainlfiles $f"
+		;;
+	false)
+		otherlfiles="$otherlfiles $f"
+		;;
+	esac
+done
+
+mainyfiles=
+otheryfiles=
+for f in $yfiles; do
+	matched_main=false
+
+	sed -e 's@//.*$@@' < $f > $SCRATCH_FILE2
+
+	if grep '[ 	]main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	elif grep '^main[ 	]*(' $SCRATCH_FILE2 > /dev/null 2>&1; then
+		matched_main=true
+	fi
+
+	case "$matched_main" in
+	true)
+		mainyfiles="$mainyfiles $f"
+		;;
+	false)
+		otheryfiles="$otheryfiles $f"
+		;;
+	esac
+done
+
+# Figure out what main programs will be linked against....
+if [ "$LIBRARY" != "" ]; then
+	obj=LIBRARY
+else
+	obj=OTHER_OBJFILES
+fi
+
+#
+# Start creating the makefile's contents
+#
+cat << EOF
+##############################################################################
+# This makefile originally created by gmakemake, `date`
+# 
+# Note: documentation for (GNU) make can be found online at 
+#       http://www.gnu.org/software/make/manual/make.html
+##############################################################################
+
+EOF
+
+emit_builtins
+
+emit_macros
+
+emit_implicit_rules
+
+#
+# Emitting explicit targets
+#
+cat <<-EOF
+####
+#### Explicit targets
+####
+EOF
+
+echo_n -n "all:	"
+case "$RPC_SUPPORT" in
+[yY]*) echo_n -n "rpcfiles " ;;
+esac
+case "${JAVA_SUPPORT}" in
+[yY]*) echo_n -n "\$(CLASSFILES) " ;;
+esac
+case "${LIBRARY}" in
+'')	;;
+*)	echo_n -n "\$(LIBRARY) " ;;
+esac
+echo_n -n "\$(APPS) "
+case "${DOCBOOK_SUPPORT}" in
+[yY]*) echo_n -n "docbook " ;;
+esac
+
+echo ""
+echo ""
+
+emit_help
+
+case "$RPC_SUPPORT" in
+[yY]*)
+	echo "rpcfiles: \$(RPC_GENERATED_FILES) "
+	echo ""
+	;;
+esac
+
+case "${C_FAMILY_ENABLED}" in
+[yY]*)
+	echo_n -n "objs: "
+
+	case "$RPC_SUPPORT" in
+	[yY]*)
+		echo_n -n "rpcfiles "
+		;;
+	esac
+
+	echo "\$(OBJFILES) "
+	echo ""
+esac
+
+case "${JAVA_SUPPORT}" in
+[yY]*)
+	cat << EOF_JAVA
+classes: \$(CLASSFILES)
+
+jdocs: 
+	\$(JAVADOC) \$(JDOCFLAGS) *.java 
+
+EOF_JAVA
+	;;
+esac
+
+if [ "$LIBRARY" != "" ]; then
+	echo "library: \$(LIBRARY) "
+	echo ""
+fi
+
+cat <<EOF
+archive:
+	tar cvf Archive.tar \$(SOURCEFILES) \$(OTHER_FILES) [mM]akefile 
+	compress Archive.tar
+
+unarchive:
+	zcat Archive.tar | tar xvf - 
+
+rebuild: clean all
+
+clean:
+	\$(RM) \$(OBJDIR)/*.\$(OBJEXT) 
+EOF
+
+if [ "$LIBRARY" != "" ]; then
+	echo "	\$(RM) \$(LIBRARY) "
+fi
+case "${JAVA_SUPPORT}" in
+Y*)
+	echo "	\$(RM) \$(CLASSFILES) *.class "
+	;;
+esac
+case "${DOCBOOK_SUPPORT}" in
+[yY]*)
+	echo "	\$(RM) \$(DOCBOOK_GENERATED_FILES) "
+	echo "	\$(RM) -r resolved \$(FO_DIR) \$(PDF_DIR) \$(CHUNKED_HTML_DIR) \$(HTML_DIR) "
+	;;
+esac
+case "${LEX}" in
+[yY]*)
+	echo "	\$(RM) \$(L_HFILES) \$(L_CXXFILES) "
+	;;
+esac
+case "${YACC}" in
+[yY]*)
+	echo "	\$(RM) \$(YACC_HFILES) \$(YACC_CXXFILES) "
+	;;
+esac
+
+cat <<EOF
+	\$(RM) \$(APPS) *.exe \$(EXEDIR)/*.exe core *.exe.stackdump 
+
+purge reallyclean: clean
+	if [ "\$(EXEDIR)" != "." ] ; then \$(RM) -r \$(EXEDIR) ; fi
+	\$(RM) -r \$(OBJDIR) \$(CLASSDIR) \$(JDOCDIR) 
+	\$(RM) \$(DEPENDENCY_FILE) 
+EOF
+
+case "$RPC_SUPPORT" in
+[yY]*)
+	echo "	\$(RM) \$(RPC_GENERATED_FILES) "
+	;;
+esac
+case "${DOCBOOK_SUPPORT}" in
+[yY]*)
+	echo "	\$(RM) -rf fo pdf html chunked resolved "
+	;;
+esac
+echo ""
+
+
+#
+# Handling "main" targets (library/applications)
+#
+
+if [ "$LIBRARY" != "" ]; then
+	cat <<EOF
+#
+# A rule to build our library
+#
+\$(LIBRARY):	\$(OTHER_OBJFILES)
+	@echo "\$@..."
+	mkdir -p "\$(LIBDIR)"
+	ar cr "\$(LIBRARY)" \$(OTHER_OBJFILES)
+	if \`which ranlib > /dev/null 2>&1\` ; then ranlib "\$(LIBRARY)" ; fi
+
+EOF
+fi
+
+case "$C_FAMILY_ENABLED" in
+[yY]*)
+	case "$mainCfiles$maincfiles$mainlfiles$mainyfiles$rpcFiles$mainobjcfiles" in
+	'')
+		cat <<EOF
+####
+# Rules to generate our applications would go here, similar to the 
+# following (which is commented-out, since it's a fake....)
+#
+
+# \$(EXEDIR)/MyApp:	\$(OBJDIR)/MyApp.\$(OBJEXT) \$($obj)
+#	@echo "\$@..."
+#	@mkdir -p \$(EXEDIR)
+#	\$(CXX) -o \$@ \$(OBJDIR)/MyApp.\$(OBJEXT) \$($obj) \$(LDFLAGS)
+EOF
+		;;
+	*)
+		cat <<-EOF
+		####
+		# Rules to generate our applications (if new apps are added, create a 
+		# new item like those below, for the new application)
+		#
+EOF
+		case "${RPC_SUPPORT}" in
+		[yY]*)
+			cat <<-EOF
+			# Note: You will need to modify the client application 
+			#       targets so that they do not link against the object 
+			#       files defining the server-side implementations of 
+			#       the RPC functions. 
+EOF
+			;;
+		esac
+
+		for f in $mainCfiles; do
+			ff=`basename $f | sed -e 's/\.C$//' -e 's/\.cpp$//' -e 's/\.cp$//' \
+								  -e 's/\.CP$//' -e 's/\.CPP$//' `
+			cat <<EOF
+
+\$(EXEDIR)/$ff:	\$(OBJDIR)/$ff.\$(OBJEXT) \$($obj)
+	@echo "\$@..."
+	@mkdir -p \$(EXEDIR)
+	\$(CXX) -o \$@ \$^ \$(LDFLAGS)
+EOF
+		done
+
+		for f in $mainobjcfiles; do
+			ff=`basename $f | sed -e 's/\.m$//'`
+			cat <<EOF
+
+\$(EXEDIR)/$ff:	\$(OBJDIR)/$ff.\$(OBJEXT) \$($obj)
+	@echo "\$@..."
+	@mkdir -p \$(EXEDIR)
+	\$(OBJCC) -o \$@ \$^ \$(LDFLAGS)
+EOF
+		done
+
+		for f in $maincfiles; do
+			ff=`basename $f | sed -e 's/\.c$//'`
+			cat <<EOF
+
+\$(EXEDIR)/$ff:	\$(OBJDIR)/$ff.\$(OBJEXT) \$($obj)
+	@echo "\$@..."
+	@mkdir -p \$(EXEDIR)
+	\$(CC) -o \$@ \$^ \$(LDFLAGS)
+EOF
+		done
+
+		for f in $mainlfiles; do
+			ff=`basename $f | sed -e 's/\.l$//' -e 's/\.lxx$//'`
+			cat <<EOF
+
+\$(EXEDIR)/$ff:	\$(OBJDIR)/$ff.\$(OBJEXT) \$($obj)
+	@echo "\$@..."
+	@mkdir -p \$(EXEDIR)
+	\$(CXX) -o \$@ \$^ \$(LDFLAGS)
+EOF
+		done
+
+		for f in $mainyfiles; do
+			ff=`basename $f | sed -e 's/\.y$//' -e 's/\.ypp$//'`
+			cat <<EOF
+
+\$(EXEDIR)/$ff:	\$(OBJDIR)/$ff.\$(OBJEXT) \$($obj)
+	@echo "\$@..."
+	@mkdir -p \$(EXEDIR)
+	\$(CXX) -o \$@ \$^ \$(LDFLAGS)
+EOF
+		done
+
+		case "${RPC_SUPPORT}" in
+		[yY]*)
+			for f in `echo "$rpcFiles " | sed -e 's/\.x /_svc.c /g'`; do
+				ff=`basename $f | sed -e 's/\.c$//'`
+				cat <<EOF
+
+\$(EXEDIR)/$ff:	\$(OBJDIR)/$ff.\$(OBJEXT) \$($obj)
+	@echo "\$@..."
+	@mkdir -p \$(EXEDIR)
+	\$(CC) -o \$@ \$^ \$(LDFLAGS)
+EOF
+			done
+			;;
+		esac
+		;;
+	esac
+	echo ""
+	echo ""
+	;;
+esac
+
+case "${JAVA_SUPPORT}" in
+[yY]*)
+	case "$mainJavaFiles" in
+	'')
+		cat <<-EOF
+		#
+		# Rules to *run* our Java applications would go here, similar to the 
+		# following (which is commented-out, since it's a fake....)
+		#
+
+		# JavaApp:	\$(CLASSFILES) 
+		#	\$(JAVA) \$(JAVAFLAGS) "\$(CLASSDIR)/JavaApp" 
+EOF
+		;;
+	*)
+		cat <<-EOF
+		#
+		# Rules to *run* our applications (if new apps are added, create a 
+		# new item like those below, for the new application)
+		#
+EOF
+		for f in $mainJavaFiles; do
+			ff=`basename $f | sed -e 's/\.java$//'`
+			cat <<EOF
+
+$ff:	\$(CLASSFILES) 
+	\$(JAVA) \$(JAVAFLAGS) $ff 
+EOF
+		done
+		;;
+	esac
+	echo ""
+	;;
+esac
+
+#
+# Emitting additional target components
+#
+case "$DOXYGEN_ON" in
+[yY]*)
+	emit_doxygen_support_targets
+	;;
+esac
+
+case "${DOCBOOK_SUPPORT}" in
+[yY]*)
+	emit_docbook_support_targets
+	;;
+esac
+
+case "$REVIEWS_ON" in
+[yY]*)
+	emit_code_review_support
+	;;
+esac
+
+case "$EXTRAS_ON" in
+[yY]*)
+	emit_extra_targets
+	;;
+esac
+
+case "$BEAUTY_ON" in
+[yY]*)
+	emit_beauty_targets
+	;;
+esac
+
+case "$CVS_ON" in
+[yY]*)
+	emit_cvs_support
+	;;
+esac
+
+case "$SVN_ON" in
+[yY]*)
+	emit_svn_support
+	case "$C_FAMILY_ENABLED" in
+	[yY]*)
+		emit_svn_version_c_support
+		;;
+	esac
+	case "$JAVA_SUPPORT" in
+	[yY]*)
+		emit_svn_version_java_support
+		;;
+	esac
+	;;
+esac
+
+case "$TESTING_ON" in
+[yY]*)
+	emit_testing_support
+	;;
+esac
+
+case "$OSX_ON" in
+[yY]*)
+	emit_osx_tools_support
+	;;
+esac
+
+emit_dependency_info
+
+
+#
+# All finished
+#
+
+exit 0
